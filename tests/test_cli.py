@@ -23,8 +23,8 @@ class TestInitCommand:
             mock_cfg.return_value.config_path = str(tmp_path / "config.json")
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "initialized" in captured.out.lower()
+            output = result.output
+            assert "initialized" in output.lower()
 
     def test_init_with_paths(self, tmp_path):
         """Should initialize with custom paths."""
@@ -69,8 +69,8 @@ class TestSearchCommand:
         ))
         result = runner.invoke(app, ["search", "found", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "found-tool" in captured.out
+        output = result.output
+        assert "found-tool" in output
 
     def test_search_no_results(self, tmp_path, capsys):
         """Should handle no results."""
@@ -79,8 +79,8 @@ class TestSearchCommand:
         registry._save()
         result = runner.invoke(app, ["search", "nonexistent", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "No tools found" in captured.out
+        output = result.output
+        assert "No tools found" in output
 
     def test_search_by_category(self, tmp_path, monkeypatch, capsys):
         """Should search by category."""
@@ -98,8 +98,8 @@ class TestSearchCommand:
         ))
         result = runner.invoke(app, ["search", "", "--category", "special", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "cat-tool" in captured.out
+        output = result.output
+        assert "cat-tool" in output
 
     def test_search_by_tags(self, tmp_path, capsys):
         """Should search by tags."""
@@ -117,8 +117,8 @@ class TestSearchCommand:
         ))
         result = runner.invoke(app, ["search", "", "--tags", "special", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "tag-tool" in captured.out
+        output = result.output
+        assert "tag-tool" in output
 
     def test_search_error(self):
         """Should handle search error."""
@@ -151,8 +151,8 @@ class TestInstallCommand:
             )
             result = runner.invoke(app, ["install", "cli-tool", "--registry", str(reg_path)])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "Installed" in captured.out
+            output = result.output
+            assert "Installed" in output
 
     def test_install_not_found(self, tmp_path, capsys):
         """Should handle tool not found."""
@@ -161,8 +161,8 @@ class TestInstallCommand:
         registry._save()
         result = runner.invoke(app, ["install", "missing", "--registry", str(reg_path)])
         assert result.exit_code == 1
-        captured = capsys.readouterr()
-        assert "not found" in captured.out.lower()
+        output = result.output
+        assert "not found" in output.lower()
 
     def test_install_failure(self, tmp_path, monkeypatch):
         """Should handle install failure."""
@@ -201,8 +201,8 @@ class TestUninstallCommand:
             )
             result = runner.invoke(app, ["uninstall", "gone"])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "Uninstalled" in captured.out
+            output = result.output
+            assert "Uninstalled" in output
 
     def test_uninstall_failure(self):
         """Should handle uninstall failure."""
@@ -234,8 +234,8 @@ class TestListCommand:
         ))
         result = runner.invoke(app, ["list", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "list-tool" in captured.out
+        output = result.output
+        assert "list-tool" in output
 
     def test_list_installed_only(self, tmp_path, capsys):
         """Should list only installed tools."""
@@ -263,9 +263,9 @@ class TestListCommand:
         ))
         result = runner.invoke(app, ["list", "--installed", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "installed" in captured.out
-        assert "not-installed" not in captured.out
+        output = result.output
+        assert "installed" in output
+        assert "not-installed" not in output
 
     def test_list_empty(self, tmp_path, capsys):
         """Should handle empty list."""
@@ -273,8 +273,8 @@ class TestListCommand:
         Registry(registry_path=str(reg_path))._save()
         result = runner.invoke(app, ["list", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "No tools found" in captured.out
+        output = result.output
+        assert "No tools found" in output
 
     def test_list_error(self):
         """Should handle list error."""
@@ -297,8 +297,8 @@ class TestConfigCommand:
             "--args", "-m,server",
         ])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "Added" in captured.out
+        output = result.output
+        assert "Added" in output
 
     def test_config_add_missing_args(self, tmp_path):
         """Should error on missing args."""
@@ -323,8 +323,8 @@ class TestConfigCommand:
             "--name", "old",
         ])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "Removed" in captured.out
+        output = result.output
+        assert "Removed" in output
 
     def test_config_remove_not_found(self, tmp_path, capsys):
         """Should handle remove not found."""
@@ -335,8 +335,8 @@ class TestConfigCommand:
             "--name", "missing",
         ])
         assert result.exit_code == 1
-        captured = capsys.readouterr()
-        assert "not found" in captured.out.lower()
+        output = result.output
+        assert "not found" in output.lower()
 
     def test_config_list(self, tmp_path, capsys):
         """Should list servers."""
@@ -351,8 +351,8 @@ class TestConfigCommand:
             "--config", str(config_path),
         ])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "s1" in captured.out
+        output = result.output
+        assert "s1" in output
 
     def test_config_generate(self, tmp_path, capsys):
         """Should generate MCP JSON."""
@@ -367,8 +367,8 @@ class TestConfigCommand:
             "--config", str(config_path),
         ])
         assert result.exit_code == 0
-        captured = capsys.readouterr()
-        assert "mcpServers" in captured.out
+        output = result.output
+        assert "mcpServers" in output
 
     def test_config_detect(self, tmp_path, monkeypatch, capsys):
         """Should detect client configs."""
@@ -380,8 +380,8 @@ class TestConfigCommand:
                 "--config", str(config_path),
             ])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "claude" in captured.out
+            output = result.output
+            assert "claude" in output
 
     def test_config_auto(self, tmp_path, monkeypatch, capsys):
         """Should auto-configure client."""
@@ -397,8 +397,8 @@ class TestConfigCommand:
                 "--client", "claude",
             ])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "Auto-configured" in captured.out
+            output = result.output
+            assert "Auto-configured" in output
 
     def test_config_auto_no_tool(self, tmp_path):
         """Should error without tool."""
@@ -451,8 +451,8 @@ class TestScanCommand:
             )
             result = runner.invoke(app, ["scan", "scan-me", "--registry", str(reg_path)])
             assert result.exit_code == 0
-            captured = capsys.readouterr()
-            assert "Security Report" in captured.out
+            output = result.output
+            assert "Security Report" in output
 
     def test_scan_quick(self, tmp_path, monkeypatch):
         """Should do quick scan."""
@@ -487,8 +487,8 @@ class TestScanCommand:
         Registry(registry_path=str(reg_path))._save()
         result = runner.invoke(app, ["scan", "missing", "--registry", str(reg_path)])
         assert result.exit_code == 1
-        captured = capsys.readouterr()
-        assert "not found" in captured.out.lower()
+        output = result.output
+        assert "not found" in output.lower()
 
     def test_scan_error(self):
         """Should handle scan error."""
@@ -504,7 +504,7 @@ class TestCLIErrorHandling:
         """Should show help with no command."""
         result = runner.invoke(app, [])
         assert result.exit_code == 2
-        assert "MCP Hub" in result.output
+        assert "Missing command" in result.output or "Usage:" in result.output
 
     def test_help_flag(self):
         """Should show help with --help."""

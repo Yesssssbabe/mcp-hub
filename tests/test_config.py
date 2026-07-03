@@ -539,7 +539,7 @@ class TestValidateClientConfigErrors:
         config_path = tmp_path / "config.json"
         cm = ConfigManager(config_path=str(config_path))
         cfg = ClientConfig(client_name="claude")
-        cfg.add_server(MCPConfig(name="s", command="npx", env={"API_SECRET": "hidden"}))
+        cfg.add_server(MCPConfig(name="s", command="npx", env={"API_SECRET": "__TEST_SECRET__"}))
         cm.configs["claude"] = cfg
         errors = cm.validate_client_config("claude")
         assert any("sensitive" in e.lower() for e in errors)

@@ -2,6 +2,7 @@
 
 import functools
 import json
+import logging
 import os
 import pathlib
 import subprocess
@@ -386,7 +387,7 @@ T = TypeVar("T")
 def retry(
     max_retries: int = 3,
     delay: float = 1.0,
-    exceptions: tuple[type[BaseException], ...] = (Exception,),
+    exceptions: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError),
     max_total_timeout: Optional[float] = 300.0,
     max_delay: float = 60.0,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
@@ -455,7 +456,7 @@ def timer(func: Callable[..., T]) -> Callable[..., T]:
         start = time.perf_counter()
         result = func(*args, **kwargs)
         elapsed = time.perf_counter() - start
-        print(f"{func.__name__} took {elapsed:.4f}s")
+        logging.getLogger("mcp-hub.timer").debug(f"{func.__name__} took {elapsed:.4f}s")
         return result
     return wrapper
 

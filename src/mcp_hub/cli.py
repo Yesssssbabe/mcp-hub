@@ -285,8 +285,8 @@ _VALID_ACTIONS = ["add", "remove", "list", "generate", "detect", "auto"]
 
 @app.command()
 def init(
-    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", help="Registry path")] = None,
-    config_path: Annotated[Optional[str], typer.Option("--config", "-c", help="Config path")] = None,
+    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", help="Registry path", max_length=256)] = None,
+    config_path: Annotated[Optional[str], typer.Option("--config", "-c", help="Config path", max_length=256)] = None,
 ) -> None:
     """Initialize MCP Hub."""
     try:
@@ -308,10 +308,10 @@ def init(
 
 @app.command()
 def search(
-    query: Annotated[str, typer.Argument(help="Search query")] = "",
-    category: Annotated[Optional[str], typer.Option("--category", "-c", help="Filter by category")] = None,
-    tags: Annotated[Optional[str], typer.Option("--tags", "-t", help="Filter by tags (comma-separated)")] = None,
-    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r")] = None,
+    query: Annotated[str, typer.Argument(help="Search query", max_length=256)] = "",
+    category: Annotated[Optional[str], typer.Option("--category", "-c", help="Filter by category", max_length=256)] = None,
+    tags: Annotated[Optional[str], typer.Option("--tags", "-t", help="Filter by tags (comma-separated)", max_length=256)] = None,
+    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", max_length=256)] = None,
 ) -> None:
     """Search for tools in the registry."""
     try:
@@ -339,9 +339,9 @@ def search(
 
 @app.command()
 def install(
-    tool_name: Annotated[str, typer.Argument(help="Tool name to install")],
-    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r")] = None,
-    base_dir: Annotated[Optional[str], typer.Option("--base-dir", "-b")] = None,
+    tool_name: Annotated[str, typer.Argument(help="Tool name to install", max_length=64)],
+    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", max_length=256)] = None,
+    base_dir: Annotated[Optional[str], typer.Option("--base-dir", "-b", max_length=256)] = None,
 ) -> None:
     """Install a tool."""
     try:
@@ -357,7 +357,7 @@ def install(
 
         # FIX-04: Installer constructor accepts install_dir only
         installer = Installer(install_dir=validated_base)
-        result = installer.install(sanitized_name)
+        result = installer.install(tool)
 
         if result.success:
             console.info(result.message)
@@ -380,8 +380,8 @@ def install(
 
 @app.command()
 def uninstall(
-    tool_name: Annotated[str, typer.Argument(help="Tool name to uninstall")],
-    base_dir: Annotated[Optional[str], typer.Option("--base-dir", "-b")] = None,
+    tool_name: Annotated[str, typer.Argument(help="Tool name to uninstall", max_length=64)],
+    base_dir: Annotated[Optional[str], typer.Option("--base-dir", "-b", max_length=256)] = None,
 ) -> None:
     """Uninstall a tool."""
     try:
@@ -409,7 +409,7 @@ def uninstall(
 @app.command(name="list")
 def list_tools(
     installed_only: Annotated[bool, typer.Option("--installed", "-i", help="Show only installed tools")] = False,
-    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r")] = None,
+    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", max_length=256)] = None,
 ) -> None:
     """List tools in the registry."""
     try:
@@ -442,12 +442,12 @@ def list_tools(
 @app.command()
 def config(
     action: Annotated[str, typer.Argument(help="Action: add, remove, list, generate, detect, auto")],
-    client: Annotated[Optional[str], typer.Option("--client", "-c")] = None,
-    tool: Annotated[Optional[str], typer.Option("--tool", "-t")] = None,
-    config_path: Annotated[Optional[str], typer.Option("--config", "-p")] = None,
-    name: Annotated[Optional[str], typer.Option("--name", "-n")] = None,
-    command: Annotated[Optional[str], typer.Option("--command", "-cmd")] = None,
-    args: Annotated[Optional[str], typer.Option("--args", "-a")] = None,
+    client: Annotated[Optional[str], typer.Option("--client", "-c", max_length=64)] = None,
+    tool: Annotated[Optional[str], typer.Option("--tool", "-t", max_length=64)] = None,
+    config_path: Annotated[Optional[str], typer.Option("--config", "-p", max_length=256)] = None,
+    name: Annotated[Optional[str], typer.Option("--name", "-n", max_length=64)] = None,
+    command: Annotated[Optional[str], typer.Option("--command", "-cmd", max_length=256)] = None,
+    args: Annotated[Optional[str], typer.Option("--args", "-a", max_length=1024)] = None,
 ) -> None:
     """Manage MCP configurations."""
     try:
@@ -535,8 +535,8 @@ def config(
 
 @app.command()
 def scan(
-    tool_name: Annotated[str, typer.Argument(help="Tool name to scan")],
-    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r")] = None,
+    tool_name: Annotated[str, typer.Argument(help="Tool name to scan", max_length=64)],
+    registry_path: Annotated[Optional[str], typer.Option("--registry", "-r", max_length=256)] = None,
     quick: Annotated[bool, typer.Option("--quick", "-q", help="Quick scan")] = False,
 ) -> None:
     """Scan a tool for security issues."""

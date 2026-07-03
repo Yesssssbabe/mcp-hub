@@ -319,13 +319,16 @@ class SecurityScanner:
 
     def _safe_search(self, compiled: re.Pattern, text: str) -> Optional[re.Match]:
         """Search with timeout protection, logging on regex timeout."""
+        _timeout_err = getattr(re, "TimeoutError", None)
         try:
             if sys.version_info >= (3, 11):
                 return compiled.search(text, timeout=self.RE_TIMEOUT)
             return compiled.search(text)
-        except re.TimeoutError:
-            logger.warning(f"Regex timeout for pattern: {compiled.pattern[:50]}...")
-            return None
+        except Exception as e:
+            if _timeout_err is not None and isinstance(e, _timeout_err):
+                logger.warning(f"Regex timeout for pattern: {compiled.pattern[:50]}...")
+                return None
+            raise
 
     def _get_python_excluded_lines(self, source: str) -> Set[int]:
         """Return line numbers that belong to __main__ blocks or multiline strings.

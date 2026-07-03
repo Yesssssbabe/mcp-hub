@@ -256,7 +256,7 @@ class TestRetryDecorator:
 
     def test_retry_eventual_success(self):
         calls = []
-        @retry(max_retries=3, delay=0.01)
+        @retry(max_retries=3, delay=0.01, exceptions=(RuntimeError,))
         def func():
             calls.append(1)
             if len(calls) < 3:
@@ -283,14 +283,14 @@ class TestRetryDecorator:
 class TestTimerDecorator:
     """Test timer decorator."""
 
-    def test_timer(self, capsys):
+    def test_timer(self, caplog):
+        caplog.set_level("DEBUG", logger="mcp-hub.timer")
         @timer
         def func():
             return 42
         result = func()
         assert result == 42
-        captured = capsys.readouterr()
-        assert "func took" in captured.out
+        assert "func took" in caplog.text
 
 
 class TestTruncateString:
