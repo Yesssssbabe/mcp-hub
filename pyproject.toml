@@ -1,5 +1,5 @@
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=1.0.0,<2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP Hub - Discover, install, and manage MCP tools."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     "MCP Hub Team <team@mcphub.dev>",
 ]
@@ -24,7 +24,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -34,19 +33,20 @@ classifiers = [
 packages = [{include = "mcp_hub", from = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.9"
-typer = ">=0.12.0"
-rich = ">=13.0.0"
-requests = ">=2.31.0"
-pydantic = ">=2.0.0"
-semver = ">=3.0.0"
+python = "^3.10"
+typer = ">=0.12.0,<1.0.0"
+rich = ">=13.0.0,<14.0.0"
+requests = ">=2.33.0,<3.0.0"
+pydantic = ">=2.4.0,<3.0.0"
+semver = ">=3.0.0,<4.0.0"
+filelock = ">=3.0.0"
 
 [tool.poetry.group.dev.dependencies]
-pytest = ">=7.0"
-pytest-cov = ">=4.0"
-black = "*"
-ruff = "*"
-mypy = "*"
+pytest = ">=7.0,<9.0"
+pytest-cov = ">=4.0,<7.0"
+black = ">=26.3.1,<27.0"
+ruff = ">=0.6.0,<1.0"
+mypy = ">=1.11.0,<2.0"
 
 [tool.poetry.scripts]
 mcp-hub = "mcp_hub.cli:app"
@@ -55,9 +55,6 @@ mcp-hub = "mcp_hub.cli:app"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-v --tb=short"
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
 
 [tool.coverage.run]
 source = ["src/mcp_hub"]
@@ -70,17 +67,17 @@ fail_under = 80
 
 [tool.black]
 line-length = 100
-target-version = ['py39']
+target-version = ['py310']
 include = '\.pyi?$'
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 select = ["E", "F", "I", "W", "UP"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

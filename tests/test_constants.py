@@ -1,5 +1,7 @@
 """Tests for mcp_hub.constants module."""
 
+from pathlib import Path
+
 import pytest
 
 from mcp_hub.constants import (
@@ -12,9 +14,9 @@ from mcp_hub.constants import (
     MCPHubError,
     RegistryError,
     SecurityError,
-    SecurityLevel,
     SUPPORTED_CLIENTS,
 )
+from mcp_hub.security import SecurityLevel
 
 
 class TestExceptionHierarchy:
@@ -55,19 +57,19 @@ class TestConstants:
     """Test constant values."""
 
     def test_default_registry_path(self):
-        assert isinstance(DEFAULT_REGISTRY_PATH, str)
-        assert DEFAULT_REGISTRY_PATH == "~/.mcp-hub/registry.json"
+        assert isinstance(DEFAULT_REGISTRY_PATH, Path)
+        assert str(DEFAULT_REGISTRY_PATH) == str(Path.home() / ".mcp-hub" / "registry.json")
 
     def test_default_config_path(self):
-        assert isinstance(DEFAULT_CONFIG_PATH, str)
-        assert DEFAULT_CONFIG_PATH == "~/.mcp-hub/config.json"
+        assert isinstance(DEFAULT_CONFIG_PATH, Path)
+        assert str(DEFAULT_CONFIG_PATH) == str(Path.home() / ".mcp-hub" / "config.json")
 
     def test_default_data_dir(self):
-        assert isinstance(DEFAULT_DATA_DIR, str)
-        assert DEFAULT_DATA_DIR == "~/.mcp-hub"
+        assert isinstance(DEFAULT_DATA_DIR, Path)
+        assert str(DEFAULT_DATA_DIR) == str(Path.home() / ".mcp-hub")
 
-    def test_supported_clients_is_list(self):
-        assert isinstance(SUPPORTED_CLIENTS, list)
+    def test_supported_clients_is_tuple(self):
+        assert isinstance(SUPPORTED_CLIENTS, tuple)
         assert all(isinstance(c, str) for c in SUPPORTED_CLIENTS)
 
     def test_supported_clients_contents(self):
@@ -75,41 +77,57 @@ class TestConstants:
         assert set(SUPPORTED_CLIENTS) == expected
 
     def test_install_types_is_list(self):
-        assert isinstance(INSTALL_TYPES, list)
+        assert isinstance(INSTALL_TYPES, (list, tuple))
         assert all(isinstance(t, str) for t in INSTALL_TYPES)
 
     def test_install_types_contents(self):
-        expected = {"pip", "npm", "uv", "source", "docker"}
+        expected = {"npm", "pip", "docker", "git", "binary"}
         assert set(INSTALL_TYPES) == expected
+
+    def test_security_levels_dict(self):
+        from mcp_hub.constants import SECURITY_LEVELS
+        assert SECURITY_LEVELS[0] == "unknown"
+        assert SECURITY_LEVELS[1] == "low"
+        assert SECURITY_LEVELS[2] == "medium"
+        assert SECURITY_LEVELS[3] == "high"
+        assert SECURITY_LEVELS[4] == "verified"
+
+    def test_log_levels(self):
+        from mcp_hub.constants import LOG_LEVELS
+        assert isinstance(LOG_LEVELS, (list, tuple))
+        assert "DEBUG" in LOG_LEVELS
+        assert "INFO" in LOG_LEVELS
+        assert "WARNING" in LOG_LEVELS
+        assert "ERROR" in LOG_LEVELS
 
 
 class TestSecurityLevel:
     """Test SecurityLevel IntEnum."""
 
     def test_security_level_values(self):
-        assert SecurityLevel.CRITICAL == 1
-        assert SecurityLevel.HIGH == 2
-        assert SecurityLevel.MEDIUM == 3
-        assert SecurityLevel.LOW == 4
-        assert SecurityLevel.SAFE == 5
+        assert SecurityLevel.UNKNOWN == 0
+        assert SecurityLevel.LOW == 1
+        assert SecurityLevel.MEDIUM == 2
+        assert SecurityLevel.HIGH == 3
+        assert SecurityLevel.VERIFIED == 4
 
     @pytest.mark.parametrize(
         "level,name",
         [
-            (SecurityLevel.CRITICAL, "CRITICAL"),
-            (SecurityLevel.HIGH, "HIGH"),
-            (SecurityLevel.MEDIUM, "MEDIUM"),
+            (SecurityLevel.UNKNOWN, "UNKNOWN"),
             (SecurityLevel.LOW, "LOW"),
-            (SecurityLevel.SAFE, "SAFE"),
+            (SecurityLevel.MEDIUM, "MEDIUM"),
+            (SecurityLevel.HIGH, "HIGH"),
+            (SecurityLevel.VERIFIED, "VERIFIED"),
         ],
     )
     def test_security_level_names(self, level, name):
         assert level.name == name
 
     def test_security_level_comparison(self):
-        assert SecurityLevel.CRITICAL < SecurityLevel.HIGH
-        assert SecurityLevel.LOW < SecurityLevel.SAFE
+        assert SecurityLevel.UNKNOWN < SecurityLevel.LOW
+        assert SecurityLevel.LOW < SecurityLevel.VERIFIED
 
     def test_security_level_from_int(self):
-        assert SecurityLevel(1) == SecurityLevel.CRITICAL
-        assert SecurityLevel(5) == SecurityLevel.SAFE
+        assert SecurityLevel(0) == SecurityLevel.UNKNOWN
+        assert SecurityLevel(4) == SecurityLevel.VERIFIED

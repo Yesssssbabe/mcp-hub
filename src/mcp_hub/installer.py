@@ -6,20 +6,29 @@ install, uninstall, update, verify, and list installed tools.
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import logging
 import os
 import platform
+import re
+import shlex
 import shutil
+import socket
+import ssl
+import stat
 import subprocess
+import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
-
-import urllib.request
 
 from mcp_hub.constants import (
     DEFAULT_DATA_DIR,
@@ -54,13 +63,204 @@ class Installer:
         "git": ["git", "--version"],
     }
 
+    # ------------------------------------------------------------------
+    # Security constants
+    # ------------------------------------------------------------------
+    MAX_DOWNLOAD_SIZE: int = 500 * 1024 * 1024  # 500 MB
+    DOWNLOAD_TIMEOUT: int = 60  # seconds
+    MAX_REDIRECTS: int = 5
+    CHUNK_SIZE: int = 8192  # 8 KB
+
+    # ------------------------------------------------------------------
+    # Security helpers (class-level, no external state)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_internal_address(host: str) -> bool:
+        """Return True if *host* resolves to a private / loopback / link-local / reserved IP."""
+        if not host:
+            return True  # empty hostname is unsafe
+
+        # Normalise localhost variants
+        if host.lower() in ("localhost", "localhost.localdomain"):
+            return True
+
+        try:
+            # Literal IP address?
+            addr = ipaddress.ip_address(host)
+            return (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_reserved
+                or addr.is_multicast
+            )
+        except ValueError:
+            # Hostname — resolve *all* A/AAAA records and check each one
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except socket.gaierror:
+                return True  # unresolvable host treated as internal / unsafe
+            for _, _, _, _, sockaddr in infos:
+                ip_str = sockaddr[0]
+                try:
+                    addr = ipaddress.ip_address(ip_str)
+                except ValueError:
+                    continue
+                if (
+                    addr.is_private
+                    or addr.is_loopback
+                    or addr.is_link_local
+                    or addr.is_reserved
+                    or addr.is_multicast
+                ):
+                    return True
+            return False
+
+    @staticmethod
+    def _validate_binary_url(url: str) -> None:
+        """Validate that *url* is safe to download from.
+
+        Raises:
+            InstallationError: on scheme != https, missing hostname,
+                               or resolved IP falls in internal space.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise InstallationError(
+                f"binary_url must use HTTPS, got scheme '{parsed.scheme}'"
+            )
+        hostname = parsed.hostname
+        if not hostname:
+            raise InstallationError("binary_url missing hostname")
+        if Installer._is_internal_address(hostname):
+            raise InstallationError(
+                f"binary_url resolves to an internal / restricted address: {hostname}"
+            )
+
+    @staticmethod
+    def _verify_checksum(dest_path: str, tool: MCPTool) -> None:
+        """Verify downloaded file size and SHA-256 if the tool declares them.
+
+        Raises:
+            InstallationError: on size or SHA-256 mismatch.
+        """
+        expected_size = getattr(tool, "binary_size", None)
+        if expected_size is not None:
+            actual_size = os.path.getsize(dest_path)
+            if actual_size != expected_size:
+                raise InstallationError(
+                    f"Download size mismatch: expected {expected_size}, got {actual_size}"
+                )
+
+        expected_sha256 = getattr(tool, "binary_sha256", None)
+        if expected_sha256:
+            h = hashlib.sha256()
+            with open(dest_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    h.update(chunk)
+            actual_sha256 = h.hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise InstallationError(
+                    f"SHA-256 checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+                )
+
+    class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+        """Custom redirect handler that validates every hop."""
+
+        max_redirects = 5
+        _redirect_count = 0
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            Installer._SafeRedirectHandler._redirect_count += 1
+            if Installer._SafeRedirectHandler._redirect_count > self.max_redirects:
+                raise InstallationError(
+                    f"Too many redirects (max {self.max_redirects})"
+                )
+            parsed = urlparse(newurl)
+            if parsed.scheme != "https":
+                raise InstallationError(
+                    f"Redirect to non-HTTPS URL: {newurl}"
+                )
+            hostname = parsed.hostname
+            if not hostname or Installer._is_internal_address(hostname):
+                raise InstallationError(
+                    f"Redirect to internal / restricted address: {newurl}"
+                )
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
     def __init__(self, install_dir: Optional[str] = None) -> None:
         self.install_dir = install_dir or os.path.expanduser("~/.mcp-hub/installed")
+        if not os.path.isabs(self.install_dir):
+            raise ValueError(f"install_dir must be an absolute path: {self.install_dir}")
         self.log_dir = os.path.join(DEFAULT_DATA_DIR, "logs")
         self.registry = Registry()
 
-        os.makedirs(self.install_dir, exist_ok=True)
-        os.makedirs(self.log_dir, exist_ok=True)
+        self._secure_makedirs(self.install_dir)
+        self._secure_makedirs(self.log_dir)
+
+    # ------------------------------------------------------------------
+    # Security helpers
+    # ------------------------------------------------------------------
+
+    def _validate_tool_name(self, tool_name: str) -> None:
+        """Validate tool_name to prevent path traversal attacks.
+
+        Only allows alphanumeric characters, hyphens, and underscores.
+        """
+        if not tool_name or not re.match(r'^[a-zA-Z0-9_-]+$', tool_name):
+            raise ValueError(
+                f"Invalid tool_name '{tool_name}': only alphanumeric, "
+                "hyphen and underscore characters are allowed"
+            )
+
+    def _validate_path_in_install_dir(self, path: str) -> None:
+        """Validate that a resolved path is within the install_dir.
+
+        Raises ValueError if the resolved path escapes the install_dir.
+        """
+        resolved = Path(path).resolve()
+        base = Path(self.install_dir).resolve()
+        # Ensure the resolved path starts with base + separator to prevent
+        # prefix attacks (e.g., /install_dir_evilsuffix)
+        if not str(resolved).startswith(str(base) + os.sep):
+            raise ValueError(
+                f"Path '{path}' is outside install directory '{self.install_dir}'"
+            )
+
+    def _secure_makedirs(self, path: str) -> None:
+        """Create directory with strict 0o700 permissions.
+
+        Also ensures existing directories have correct permissions.
+        """
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        if os.path.exists(path):
+            current_mode = stat.S_IMODE(os.stat(path).st_mode)
+            if current_mode != 0o700:
+                os.chmod(path, 0o700)
+
+    def _is_valid_tool_name(self, tool_name: str) -> bool:
+        """Validate tool name against whitelist to prevent path traversal."""
+        return bool(re.match(r"^[a-zA-Z0-9_-]+$", tool_name))
+
+    def _is_valid_package_name(self, package: str) -> bool:
+        """Validate package name to prevent option injection.
+
+        Must not start with '-' and must only contain safe characters.
+        """
+        if not package or package.startswith("-"):
+            return False
+        return bool(re.match(r"^[a-zA-Z0-9_.@-]+$", package))
+
+    def _is_valid_command_arg(self, arg: str) -> bool:
+        """Validate a command argument to prevent shell injection.
+
+        Allowed characters: alphanumeric, dot, underscore, slash,
+        colon, at-sign, and hyphen.
+        """
+        if not arg:
+            return False
+        return bool(re.match(r"^[a-zA-Z0-9_.\/:@-]+$", arg))
 
     # ------------------------------------------------------------------
     # Public API
@@ -85,14 +285,29 @@ class Installer:
 
         If any step fails the installer attempts to roll back partial changes.
         """
+        # Validate tool_name before any path construction to prevent path traversal
+        try:
+            self._validate_tool_name(tool_name)
+        except ValueError as exc:
+            msg = str(exc)
+            logger.error(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
         start_time = time.time()
         errors: List[str] = []
 
         # 1. Registry lookup
         try:
             tool = self.registry.get_tool(tool_name)
-        except Exception as exc:  # pragma: no cover
-            msg = f"Tool '{tool_name}' not found in registry: {exc}"
+        except KeyError as exc:
+            tool = None
+        if tool is None:
+            msg = f"Tool '{tool_name}' not found in registry"
             logger.error(msg)
             return InstallResult(
                 success=False,
@@ -133,11 +348,15 @@ class Installer:
 
         # 4. Dispatch installer
         installer_fn = getattr(self, f"_install_{chosen_method}")
-        result = installer_fn(tool, target_dir)
-        result.install_method = chosen_method
+        try:
+            result = installer_fn(tool, target_dir)
+            result.install_method = chosen_method
+        except BaseException:
+            self._cleanup_on_failure(tool_name, target_dir, tool)
+            raise
 
         if not result.success:
-            self._cleanup_on_failure(tool_name, target_dir)
+            self._cleanup_on_failure(tool_name, target_dir, tool)
             return result
 
         # 5. Verify
@@ -145,7 +364,7 @@ class Installer:
             msg = f"Installation verification failed for '{tool_name}'"
             logger.error(msg)
             errors.append(msg)
-            self._cleanup_on_failure(tool_name, target_dir)
+            self._cleanup_on_failure(tool_name, target_dir, tool)
             return InstallResult(
                 success=False,
                 tool_name=tool_name,
@@ -158,11 +377,11 @@ class Installer:
         # 6. Mark installed
         try:
             self.registry.mark_installed(tool_name, target_dir, chosen_method)
-        except Exception as exc:  # pragma: no cover
+        except OSError as exc:
             msg = f"Failed to mark '{tool_name}' as installed: {exc}"
             logger.error(msg)
             errors.append(msg)
-            self._cleanup_on_failure(tool_name, target_dir)
+            self._cleanup_on_failure(tool_name, target_dir, tool)
             return InstallResult(
                 success=False,
                 tool_name=tool_name,
@@ -209,12 +428,17 @@ class Installer:
 
         errors: List[str] = []
 
-        # Remove installation directory
+        # Remove installation directory (with path boundary validation)
         try:
+            self._validate_path_in_install_dir(install_path)
             if os.path.isdir(install_path):
                 shutil.rmtree(install_path)
                 logger.info("Removed installation directory: %s", install_path)
-        except Exception as exc:  # pragma: no cover
+        except ValueError as exc:
+            msg = str(exc)
+            logger.error(msg)
+            errors.append(msg)
+        except OSError as exc:
             msg = f"Failed to remove directory {install_path}: {exc}"
             logger.error(msg)
             errors.append(msg)
@@ -226,7 +450,7 @@ class Installer:
                 if os.path.exists(log_path):
                     os.remove(log_path)
                     logger.info("Removed install log: %s", log_path)
-            except Exception as exc:  # pragma: no cover
+            except OSError as exc:
                 msg = f"Failed to remove log {log_path}: {exc}"
                 logger.error(msg)
                 errors.append(msg)
@@ -234,7 +458,7 @@ class Installer:
         # Update registry
         try:
             self.registry.mark_uninstalled(tool_name)
-        except Exception as exc:  # pragma: no cover
+        except OSError as exc:
             msg = f"Failed to update registry for '{tool_name}': {exc}"
             logger.error(msg)
             errors.append(msg)
@@ -269,7 +493,7 @@ class Installer:
         return self.registry.list_installed()
 
     def update(self, tool_name: str) -> InstallResult:
-        """Update an installed tool to the latest version."""
+        """Update an installed tool to the latest version using atomic swap."""
         if not self.is_installed(tool_name):
             msg = f"Tool '{tool_name}' is not installed; cannot update"
             logger.warning(msg)
@@ -282,14 +506,8 @@ class Installer:
 
         install_path = self.get_install_path(tool_name)
         method = self.registry.get_install_method(tool_name)
-
-        # For most methods the simplest update is reinstall
-        try:
-            self.registry.mark_uninstalled(tool_name)
-            if install_path and os.path.isdir(install_path):
-                shutil.rmtree(install_path)
-        except Exception as exc:  # pragma: no cover
-            msg = f"Failed to clean old version of '{tool_name}': {exc}"
+        if not install_path or not method:
+            msg = f"Cannot determine install path or method for '{tool_name}'"
             logger.error(msg)
             return InstallResult(
                 success=False,
@@ -298,7 +516,87 @@ class Installer:
                 errors=[msg],
             )
 
-        return self.install(tool_name, method=method)
+        try:
+            self._validate_path_in_install_dir(install_path)
+        except ValueError as exc:
+            msg = f"Security check failed for '{tool_name}': {exc}"
+            logger.error(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
+        try:
+            tool = self.registry.get_tool(tool_name)
+        except KeyError:
+            tool = None
+
+        old_path = install_path + ".old"
+        try:
+            # Remove any stale old directory from a previous failed update
+            if os.path.isdir(old_path):
+                self._validate_path_in_install_dir(old_path)
+                shutil.rmtree(old_path)
+
+            # Atomically move current installation to old_path
+            os.rename(install_path, old_path)
+
+            # Install new version (will use the original install_path)
+            result = self.install(tool_name, method=method)
+            if result.success:
+                # New version succeeded, clean up old version
+                try:
+                    self._validate_path_in_install_dir(old_path)
+                    shutil.rmtree(old_path)
+                except ValueError as exc:
+                    logger.warning("Security check failed for old path of '%s': %s", tool_name, exc)
+                except OSError as exc:
+                    logger.warning("Failed to remove old version of '%s': %s", tool_name, exc)
+                return result
+
+            # New version failed — rollback
+            msg = f"Update failed for '{tool_name}': {result.message}"
+            logger.error(msg)
+
+            # Clean up any partial new installation
+            self._cleanup_on_failure(tool_name, install_path, tool)
+
+            # Restore old version
+            if os.path.isdir(old_path):
+                if os.path.isdir(install_path):
+                    self._validate_path_in_install_dir(install_path)
+                    shutil.rmtree(install_path)
+                os.rename(old_path, install_path)
+                try:
+                    self.registry.mark_installed(tool_name, install_path, method)
+                except OSError as exc:
+                    logger.error("Failed to restore registry for '%s': %s", tool_name, exc)
+                    return InstallResult(
+                        success=False,
+                        tool_name=tool_name,
+                        message=f"Update failed and registry restore failed: {exc}",
+                        errors=result.errors + [str(exc)],
+                    )
+
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=f"Update failed, old version restored: {result.message}",
+                install_path=install_path,
+                errors=result.errors,
+            )
+
+        except OSError as exc:
+            msg = f"Failed to prepare update for '{tool_name}': {exc}"
+            logger.error(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
 
     def verify_installation(self, tool_name: str) -> bool:
         """Verify a tool is properly installed and working."""
@@ -325,7 +623,7 @@ class Installer:
         try:
             with open(log_path, "r", encoding="utf-8") as fh:
                 return fh.read()
-        except Exception as exc:  # pragma: no cover
+        except OSError as exc:
             logger.error("Failed to read log for %s: %s", tool_name, exc)
             return None
 
@@ -341,14 +639,25 @@ class Installer:
 
         self._write_log(tool_name, f"[npm] Installing package: {package}\n")
 
+        # Validate package name to prevent option injection (e.g. --nodedir=/tmp/evil)
+        if not self._is_valid_package_name(package):
+            msg = f"Invalid npm package name '{package}' for '{tool_name}'"
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
         env = os.environ.copy()
         env["NPM_CONFIG_PREFIX"] = target_dir
         env["PATH"] = os.path.join(target_dir, "bin") + os.pathsep + env.get("PATH", "")
 
-        os.makedirs(target_dir, exist_ok=True)
+        self._secure_makedirs(target_dir)
 
-        # npm install <package>
-        cmd = ["npm", "install", package, "--prefix", target_dir]
+        # npm install --prefix <target_dir> -- <package>
+        # The -- terminator prevents the package from being parsed as an option
+        cmd = ["npm", "install", "--prefix", target_dir, "--", package]
         returncode, stdout, stderr = self._run_command(
             cmd,
             cwd=target_dir,
@@ -387,16 +696,30 @@ class Installer:
 
         self._write_log(tool_name, f"[pip] Installing package: {package}\n")
 
+        # Validate package name to prevent option injection
+        if not self._is_valid_package_name(package):
+            msg = f"Invalid pip package name '{package}' for '{tool_name}'"
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
         env = os.environ.copy()
         env["PIP_TARGET"] = target_dir
         env["PYTHONPATH"] = target_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-        os.makedirs(target_dir, exist_ok=True)
+        self._secure_makedirs(target_dir)
 
         if editable:
+            # In editable mode, package is the argument to -e.
+            # We cannot insert -- between -e and its argument,
+            # so we rely on package name validation (already checked above).
             cmd = ["pip", "install", "-e", package, "--target", target_dir]
         else:
-            cmd = ["pip", "install", package, "--target", target_dir]
+            # Place -- before the package so it cannot be parsed as an option
+            cmd = ["pip", "install", "--target", target_dir, "--", package]
 
         returncode, stdout, stderr = self._run_command(
             cmd,
@@ -434,7 +757,7 @@ class Installer:
 
         self._write_log(tool_name, f"[docker] Pulling image: {image}\n")
 
-        os.makedirs(target_dir, exist_ok=True)
+        self._secure_makedirs(target_dir)
 
         # Pull image
         cmd = ["docker", "pull", image]
@@ -460,11 +783,12 @@ class Installer:
         # Write a helper run script so the tool can be started later
         run_script = os.path.join(target_dir, "run.sh")
         try:
-            with open(run_script, "w", encoding="utf-8") as fh:
-                fh.write(f"#!/bin/sh\n")
-                fh.write(f'docker run --rm -it "{image}" "$@"\n')
-            os.chmod(run_script, 0o755)
-        except Exception as exc:  # pragma: no cover
+            # Atomic creation with restrictive permissions to prevent TOCTOU
+            fd = os.open(run_script, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o700)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n")
+                fh.write(f"docker run --rm -it {shlex.quote(image)} \"$@\"\n")
+        except OSError as exc:
             msg = f"Failed to write docker run script for '{tool_name}': {exc}"
             errors.append(msg)
             return InstallResult(
@@ -498,8 +822,9 @@ class Installer:
         errors: List[str] = []
         self._write_log(tool_name, f"[git] Cloning repo: {repo_url}\n")
 
-        # Clone into target_dir
-        cmd = ["git", "clone", "--depth", "1", repo_url, target_dir]
+        # Clone into target_dir with hooks disabled to prevent arbitrary code execution
+        # Use -- to prevent repo_url from being parsed as a git option
+        cmd = ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1", "--", repo_url, target_dir]
         returncode, stdout, stderr = self._run_command(
             cmd,
             timeout=300,
@@ -522,9 +847,50 @@ class Installer:
         # Run optional post-clone install command
         install_cmd = getattr(tool, "install_command", None)
         if install_cmd:
-            self._write_log(tool_name, f"[git] Running install command: {install_cmd}\n")
+            # STRICT: Reject string-type install_command entirely.
+            # Only list-type is accepted to prevent command injection via .split().
+            if isinstance(install_cmd, str):
+                msg = (
+                    f"install_command must be a list for '{tool_name}', "
+                    f"string format is not supported"
+                )
+                return InstallResult(
+                    success=False,
+                    tool_name=tool_name,
+                    message=msg,
+                    errors=[msg],
+                )
+            if not isinstance(install_cmd, list) or not all(
+                isinstance(a, str) for a in install_cmd
+            ):
+                msg = (
+                    f"install_command must be a list of strings for "
+                    f"'{tool_name}'"
+                )
+                return InstallResult(
+                    success=False,
+                    tool_name=tool_name,
+                    message=msg,
+                    errors=[msg],
+                )
+            # Validate each argument against whitelist
+            for arg in install_cmd:
+                if not self._is_valid_command_arg(arg):
+                    msg = (
+                        f"install_command contains illegal characters in "
+                        f"argument: {arg}"
+                    )
+                    return InstallResult(
+                        success=False,
+                        tool_name=tool_name,
+                        message=msg,
+                        errors=[msg],
+                    )
+            self._write_log(
+                tool_name, f"[git] Running install command: {install_cmd}\n"
+            )
             returncode, stdout, stderr = self._run_command(
-                install_cmd.split(),
+                install_cmd,
                 cwd=target_dir,
                 timeout=300,
             )
@@ -566,27 +932,79 @@ class Installer:
             )
 
         errors: List[str] = []
+
+        # --- Security validation ------------------------------------------
+        try:
+            self._validate_binary_url(binary_url)
+        except InstallationError as exc:
+            msg = f"binary_url security validation failed for '{tool_name}': {exc}"
+            errors.append(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                install_path=target_dir,
+                errors=errors,
+            )
+
         self._write_log(tool_name, f"[binary] Downloading from: {binary_url}\n")
 
-        os.makedirs(target_dir, exist_ok=True)
+        self._secure_makedirs(target_dir)
 
         # Determine filename
         parsed = urlparse(binary_url)
         filename = os.path.basename(parsed.path) or tool_name
+        # Sanitize filename to prevent path traversal
+        filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+        if filename in ('.', '..', ''):
+            filename = 'download'
         dest_path = os.path.join(target_dir, filename)
 
-        # Download with urllib (no extra deps)
+        # --- Secure download with chunked read + size limit + redirect ctrl -
         try:
-            req = urllib.request.Request(
-                binary_url,
-                headers={"User-Agent": "mcp-hub-installer/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=300) as response:
-                with open(dest_path, "wb") as out_file:
-                    out_file.write(response.read())
-        except Exception as exc:  # pragma: no cover
+            self._download_binary_to_file(binary_url, dest_path)
+        except InstallationError as exc:
             msg = f"Failed to download binary for '{tool_name}': {exc}"
             errors.append(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                install_path=target_dir,
+                errors=errors,
+            )
+        except urllib.error.URLError as exc:
+            msg = f"Failed to download binary for '{tool_name}': {exc}"
+            errors.append(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                install_path=target_dir,
+                errors=errors,
+            )
+        except Exception as exc:  # pragma: no cover
+            msg = f"Unexpected error downloading binary for '{tool_name}': {exc}"
+            errors.append(msg)
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                install_path=target_dir,
+                errors=errors,
+            )
+
+        # --- Integrity verification ---------------------------------------
+        try:
+            self._verify_checksum(dest_path, tool)
+        except InstallationError as exc:
+            msg = f"Integrity check failed for '{tool_name}': {exc}"
+            errors.append(msg)
+            # Remove corrupted file before returning error
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
             return InstallResult(
                 success=False,
                 tool_name=tool_name,
@@ -598,9 +1016,17 @@ class Installer:
         # Make executable on Unix-like systems
         if platform.system() != "Windows":
             try:
-                os.chmod(dest_path, 0o755)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Could not chmod binary for %s: %s", tool_name, exc)
+                os.chmod(dest_path, 0o700)
+            except OSError as exc:
+                msg = f"Failed to make binary executable for '{tool_name}': {exc}"
+                logger.warning(msg)
+                return InstallResult(
+                    success=False,
+                    tool_name=tool_name,
+                    message=msg,
+                    install_path=target_dir,
+                    errors=[msg],
+                )
 
         # Optionally handle archives (zip / tar.gz)
         if filename.endswith(".zip"):
@@ -614,6 +1040,44 @@ class Installer:
             message=f"Binary downloaded for '{tool_name}' to {dest_path}",
             install_path=target_dir,
         )
+
+    def _download_binary_to_file(self, url: str, dest_path: str) -> None:
+        """Download *url* to *dest_path* with TLS 1.2+, chunked read, size limit, and safe redirect.
+
+        Raises:
+            InstallationError: on security or size violations.
+            urllib.error.URLError: on network-level failures.
+        """
+        # Build TLS 1.2+ context
+        ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        # Reset redirect counter for this download
+        Installer._SafeRedirectHandler._redirect_count = 0
+        opener = urllib.request.build_opener(Installer._SafeRedirectHandler())
+
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "mcp-hub-installer/1.0"},
+        )
+
+        with opener.open(req, timeout=self.DOWNLOAD_TIMEOUT) as response:
+            # Atomic creation with restrictive permissions
+            fd = os.open(dest_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as out_file:
+                total = 0
+                while True:
+                    chunk = response.read(self.CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self.MAX_DOWNLOAD_SIZE:
+                        raise InstallationError(
+                            f"Download exceeded maximum allowed size "
+                            f"({self.MAX_DOWNLOAD_SIZE} bytes = 500 MB). "
+                            f"Received so far: {total} bytes"
+                        )
+                    out_file.write(chunk)
 
     # ------------------------------------------------------------------
     # Verification helpers
@@ -699,24 +1163,7 @@ class Installer:
         env: Optional[Dict[str, str]] = None,
         timeout: int = 300,
     ) -> Tuple[int, str, str]:
-        """Run a shell command and return (returncode, stdout, stderr).
-
-        Parameters
-        ----------
-        cmd:
-            Command and arguments as a list.
-        cwd:
-            Working directory for the subprocess.
-        env:
-            Optional environment dict.  If omitted, inherits the current env.
-        timeout:
-            Maximum seconds to wait for the command.
-
-        Returns
-        -------
-        tuple
-            (returncode, stdout_string, stderr_string)
-        """
+        """Run a shell command and return (returncode, stdout, stderr)."""
         logger.debug("Running command: %s in cwd=%s timeout=%s", cmd, cwd, timeout)
         try:
             proc = subprocess.run(
@@ -730,14 +1177,14 @@ class Installer:
             )
             return proc.returncode, proc.stdout or "", proc.stderr or ""
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
-            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            stdout = exc.stdout if exc.stdout else ""
+            stderr = exc.stderr if exc.stderr else ""
             logger.error("Command timed out after %ss: %s", timeout, cmd)
             return -1, stdout, f"Command timed out after {timeout}s\n{stderr}"
         except FileNotFoundError:
             logger.error("Command not found: %s", cmd[0])
             return -1, "", f"Command not found: {cmd[0]}"
-        except Exception as exc:  # pragma: no cover
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
             logger.error("Unexpected error running %s: %s", cmd, exc)
             return -1, "", str(exc)
 
@@ -747,11 +1194,17 @@ class Installer:
         stdout: str = "",
         stderr: str = "",
     ) -> None:
-        """Append output to the per-tool install log."""
+        """Append output to the per-tool install log.
+
+        Uses atomic file creation with 0o600 permissions to prevent log tampering.
+        Sensitive information is not filtered here; callers should sanitize if needed.
+        """
         log_path = self._log_path(tool_name)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
-            with open(log_path, "a", encoding="utf-8") as fh:
+            # Atomic open with restrictive 0o600 permissions (owner read/write only)
+            fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(f"\n--- {timestamp} ---\n")
                 if stdout:
                     fh.write("[stdout]\n")
@@ -761,25 +1214,54 @@ class Installer:
                     fh.write("[stderr]\n")
                     fh.write(stderr)
                     fh.write("\n")
-        except Exception as exc:  # pragma: no cover
+        except OSError as exc:
             logger.error("Failed to write log for %s: %s", tool_name, exc)
 
     def _log_path(self, tool_name: str) -> str:
-        """Return the filesystem path for a tool's installation log."""
-        return os.path.join(self.log_dir, f"{tool_name}.install.log")
+        """Return the filesystem path for a tool's installation log.
 
-    def _cleanup_on_failure(self, tool_name: str, target_dir: str) -> None:
+        Sanitizes tool_name to prevent path traversal via log file names.
+        """
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
+        return os.path.join(self.log_dir, f"{safe_name}.install.log")
+
+    def _cleanup_on_failure(
+        self, tool_name: str, target_dir: str, tool: Optional[MCPTool] = None
+    ) -> None:
         """Remove partially-installed artifacts on failure."""
         logger.info("Rolling back partial installation for '%s' at %s", tool_name, target_dir)
+
+        # Remove target directory
         try:
+            self._validate_path_in_install_dir(target_dir)
             if os.path.isdir(target_dir):
                 shutil.rmtree(target_dir)
-        except Exception as exc:  # pragma: no cover
+        except ValueError as exc:
+            logger.error("Security check failed during rollback for '%s': %s", tool_name, exc)
+        except OSError as exc:
             logger.error("Rollback failed for '%s': %s", tool_name, exc)
 
+        # Remove Docker image if applicable
+        if tool is not None:
+            image = getattr(tool, "docker_image", None)
+            if image:
+                try:
+                    self._run_command(["docker", "rmi", image], timeout=60)
+                except OSError as exc:
+                    logger.error("Failed to remove Docker image '%s' for '%s': %s", image, tool_name, exc)
+
+        # Remove install log
+        log_path = self._log_path(tool_name)
+        try:
+            if os.path.exists(log_path):
+                os.remove(log_path)
+        except OSError as exc:
+            logger.error("Failed to remove install log for '%s': %s", tool_name, exc)
+
+        # Clear registry record
         try:
             self.registry.mark_uninstalled(tool_name)
-        except Exception as exc:  # pragma: no cover
+        except OSError as exc:
             logger.error("Failed to clear registry for '%s': %s", tool_name, exc)
 
     def _extract_archive(
@@ -789,23 +1271,118 @@ class Installer:
         archive_path: str,
         archive_type: str,
     ) -> InstallResult:
-        """Extract a downloaded archive."""
+        """Extract a downloaded archive with safety checks against Zip/Tar Slip."""
         tool_name = tool.name
         errors: List[str] = []
         self._write_log(tool_name, f"[binary] Extracting {archive_type} archive: {archive_path}\n")
 
+        def _is_safe_path(base: str, target: str) -> bool:
+            """Ensure target path is strictly under base directory."""
+            abs_base = os.path.abspath(base)
+            abs_target = os.path.abspath(target)
+            try:
+                return os.path.commonpath([abs_base, abs_target]) == abs_base
+            except ValueError:
+                # Different drives on Windows
+                return False
+
+        def _has_path_traversal(name: str) -> bool:
+            """Check if path contains '..' components."""
+            for part in name.replace("\\", "/").split("/"):
+                if part == "..":
+                    return True
+            return False
+
         try:
             if archive_type == "zip":
-                import zipfile
                 with zipfile.ZipFile(archive_path, "r") as zf:
+                    for member in zf.infolist():
+                        # Reject path traversal sequences
+                        if _has_path_traversal(member.filename):
+                            raise InstallationError(
+                                f"Path traversal in archive: {member.filename}"
+                            )
+                        # Reject absolute paths
+                        if os.path.isabs(member.filename):
+                            raise InstallationError(
+                                f"Absolute path in archive: {member.filename}"
+                            )
+                        dest = os.path.join(target_dir, member.filename)
+                        # Validate destination is strictly under target_dir
+                        if not _is_safe_path(target_dir, dest):
+                            raise InstallationError(
+                                f"Zip Slip detected: {member.filename}"
+                            )
+                        # Reject symlinks (Unix external_attr high 4 bits == 0xA)
+                        if (member.external_attr >> 28) == 0xA:
+                            raise InstallationError(
+                                f"Symlink in archive: {member.filename}"
+                            )
                     zf.extractall(target_dir)
+
             elif archive_type in ("tar.gz", "tgz"):
-                import tarfile
                 with tarfile.open(archive_path, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        # Reject path traversal sequences
+                        if _has_path_traversal(member.name):
+                            raise InstallationError(
+                                f"Path traversal in archive: {member.name}"
+                            )
+                        # Reject absolute paths
+                        if os.path.isabs(member.name):
+                            raise InstallationError(
+                                f"Absolute path in archive: {member.name}"
+                            )
+                        dest = os.path.join(target_dir, member.name)
+                        # Validate destination is strictly under target_dir
+                        if not _is_safe_path(target_dir, dest):
+                            raise InstallationError(
+                                f"Tar Slip detected: {member.name}"
+                            )
+                        # Reject symlinks and hardlinks
+                        if member.issym() or member.islnk():
+                            raise InstallationError(
+                                f"Link in archive: {member.name}"
+                            )
                     tf.extractall(target_dir)
+
+            # Post-extraction validation: ensure all extracted items are within target_dir
+            for root, dirs, files in os.walk(target_dir):
+                for name in dirs + files:
+                    full_path = os.path.join(root, name)
+                    # Verify file is within target_dir
+                    if not _is_safe_path(target_dir, full_path):
+                        raise InstallationError(
+                            f"Extracted file outside target directory: {full_path}"
+                        )
+                    # Reject any symlinks created during extraction
+                    if os.path.islink(full_path):
+                        link_target = os.readlink(full_path)
+                        if os.path.isabs(link_target):
+                            raise InstallationError(
+                                f"Symlink with absolute target: {full_path} -> {link_target}"
+                            )
+                        resolved = os.path.join(os.path.dirname(full_path), link_target)
+                        if not _is_safe_path(target_dir, resolved):
+                            raise InstallationError(
+                                f"Symlink points outside target: {full_path} -> {link_target}"
+                            )
+
             # Remove archive after extraction
             os.remove(archive_path)
-        except Exception as exc:  # pragma: no cover
+
+        except InstallationError as exc:
+            msg = f"Security violation in archive for '{tool_name}': {exc}"
+            errors.append(msg)
+            self._write_log(tool_name, f"[binary] {msg}\n")
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                install_path=target_dir,
+                errors=errors,
+            )
+        except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
             msg = f"Failed to extract archive for '{tool_name}': {exc}"
             errors.append(msg)
             return InstallResult(

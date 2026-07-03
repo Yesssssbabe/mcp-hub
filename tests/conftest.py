@@ -1,7 +1,11 @@
 """Shared fixtures for MCP Hub tests."""
 
+import copy
 import json
 import os
+
+# Allow tests to use temporary paths outside ~/.mcp-hub.
+os.environ.setdefault("MCP_HUB_TEST_MODE", "1")
 
 import pytest
 
@@ -59,7 +63,7 @@ def sample_tool_dict():
 @pytest.fixture
 def mock_registry_data():
     """Return sample registry data with multiple tools."""
-    return {
+    data = {
         "tools": [
             {
                 "name": "tool-a",
@@ -77,7 +81,7 @@ def mock_registry_data():
                 "downloads": 1000,
                 "security_score": 3,
                 "is_installed": True,
-                "install_path": "/tmp/mcp/tools/tool-a",
+                "install_path": "/fake/tmp/path/tool-a",
                 "permissions": ["filesystem:read"],
             },
             {
@@ -114,11 +118,12 @@ def mock_registry_data():
                 "downloads": 200,
                 "security_score": 4,
                 "is_installed": True,
-                "install_path": "/tmp/mcp/tools/tool-c",
+                "install_path": "/fake/tmp/path/tool-c",
                 "permissions": ["filesystem:read"],
             },
         ]
     }
+    return copy.deepcopy(data)
 
 
 @pytest.fixture
@@ -153,6 +158,6 @@ def sample_mcp_config():
         name="sample-server",
         command="python",
         args=["-m", "mcp_server"],
-        env={"API_KEY": "test-key"},
+        env={"API_KEY": "__TEST_API_KEY__"},
         description="A sample MCP server",
     )

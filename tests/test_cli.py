@@ -1,5 +1,6 @@
 """Tests for mcp_hub.cli module."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +15,7 @@ runner = CliRunner()
 class TestInitCommand:
     """Test `init` CLI command."""
 
-    def test_init_default(self, tmp_path):
+    def test_init_default(self, tmp_path, capsys):
         """Should initialize with default paths."""
         with patch("mcp_hub.cli.Registry") as mock_reg, \
              patch("mcp_hub.cli.ConfigManager") as mock_cfg:
@@ -22,7 +23,8 @@ class TestInitCommand:
             mock_cfg.return_value.config_path = str(tmp_path / "config.json")
             result = runner.invoke(app, ["init"])
             assert result.exit_code == 0
-            assert "initialized" in result.output.lower()
+            captured = capsys.readouterr()
+            assert "initialized" in captured.out.lower()
 
     def test_init_with_paths(self, tmp_path):
         """Should initialize with custom paths."""
@@ -48,62 +50,75 @@ class TestSearchCommand:
     def test_search_empty(self, tmp_path):
         """Should handle empty search."""
         reg_path = tmp_path / "registry.json"
-        Registry(registry_path=str(reg_path)).save()
+        Registry(registry_path=str(reg_path))._save()
         result = runner.invoke(app, ["search", "", "--registry", str(reg_path)])
         assert result.exit_code == 0
 
-    def test_search_with_results(self, tmp_path, monkeypatch):
+    def test_search_with_results(self, tmp_path, monkeypatch, capsys):
         """Should display search results."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="found-tool",
+            display_name="Found Tool",
             description="A tool that matches",
             install_type="pip",
-            install_spec="found",
+            install_command="pip install found-tool",
+            author="Test Author",
+            repository="https://github.com/test/found-tool",
         ))
         result = runner.invoke(app, ["search", "found", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "found-tool" in result.output
+        captured = capsys.readouterr()
+        assert "found-tool" in captured.out
 
-    def test_search_no_results(self, tmp_path):
+    def test_search_no_results(self, tmp_path, capsys):
         """Should handle no results."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
-        registry.save()
+        registry._save()
         result = runner.invoke(app, ["search", "nonexistent", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "No tools found" in result.output
+        captured = capsys.readouterr()
+        assert "No tools found" in captured.out
 
-    def test_search_by_category(self, tmp_path, monkeypatch):
+    def test_search_by_category(self, tmp_path, monkeypatch, capsys):
         """Should search by category."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="cat-tool",
+            display_name="Cat Tool",
             description="test",
             install_type="pip",
-            install_spec="cat",
-            category="special",
+            install_command="pip install cat-tool",
+            author="Test Author",
+            repository="https://github.com/test/cat-tool",
+            categories=["special"],
         ))
         result = runner.invoke(app, ["search", "", "--category", "special", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "cat-tool" in result.output
+        captured = capsys.readouterr()
+        assert "cat-tool" in captured.out
 
-    def test_search_by_tags(self, tmp_path):
+    def test_search_by_tags(self, tmp_path, capsys):
         """Should search by tags."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="tag-tool",
+            display_name="Tag Tool",
             description="test",
             install_type="pip",
-            install_spec="tag",
+            install_command="pip install tag-tool",
+            author="Test Author",
+            repository="https://github.com/test/tag-tool",
             tags=["special", "tag"],
         ))
         result = runner.invoke(app, ["search", "", "--tags", "special", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "tag-tool" in result.output
+        captured = capsys.readouterr()
+        assert "tag-tool" in captured.out
 
     def test_search_error(self):
         """Should handle search error."""
@@ -115,15 +130,18 @@ class TestSearchCommand:
 class TestInstallCommand:
     """Test `install` CLI command."""
 
-    def test_install_tool(self, tmp_path, monkeypatch):
+    def test_install_tool(self, tmp_path, monkeypatch, capsys):
         """Should install a tool."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="cli-tool",
+            display_name="CLI Tool",
             description="test",
             install_type="pip",
-            install_spec="cli-tool",
+            install_command="pip install cli-tool",
+            author="Test Author",
+            repository="https://github.com/test/cli-tool",
         ))
         with patch("mcp_hub.cli.Installer") as mock_inst:
             mock_inst.return_value.install.return_value = MagicMock(
@@ -133,16 +151,18 @@ class TestInstallCommand:
             )
             result = runner.invoke(app, ["install", "cli-tool", "--registry", str(reg_path)])
             assert result.exit_code == 0
-            assert "Installed" in result.output
+            captured = capsys.readouterr()
+            assert "Installed" in captured.out
 
-    def test_install_not_found(self, tmp_path):
+    def test_install_not_found(self, tmp_path, capsys):
         """Should handle tool not found."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
-        registry.save()
+        registry._save()
         result = runner.invoke(app, ["install", "missing", "--registry", str(reg_path)])
         assert result.exit_code == 1
-        assert "not found" in result.output.lower()
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower()
 
     def test_install_failure(self, tmp_path, monkeypatch):
         """Should handle install failure."""
@@ -150,9 +170,12 @@ class TestInstallCommand:
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="fail-tool",
+            display_name="Fail Tool",
             description="test",
             install_type="pip",
-            install_spec="fail",
+            install_command="pip install fail-tool",
+            author="Test Author",
+            repository="https://github.com/test/fail-tool",
         ))
         with patch("mcp_hub.cli.Installer") as mock_inst:
             mock_inst.return_value.install.return_value = MagicMock(
@@ -168,7 +191,7 @@ class TestInstallCommand:
 class TestUninstallCommand:
     """Test `uninstall` CLI command."""
 
-    def test_uninstall_success(self, tmp_path, monkeypatch):
+    def test_uninstall_success(self, tmp_path, monkeypatch, capsys):
         """Should uninstall successfully."""
         with patch("mcp_hub.cli.Installer") as mock_inst:
             mock_inst.return_value.uninstall.return_value = MagicMock(
@@ -178,7 +201,8 @@ class TestUninstallCommand:
             )
             result = runner.invoke(app, ["uninstall", "gone"])
             assert result.exit_code == 0
-            assert "Uninstalled" in result.output
+            captured = capsys.readouterr()
+            assert "Uninstalled" in captured.out
 
     def test_uninstall_failure(self):
         """Should handle uninstall failure."""
@@ -195,50 +219,62 @@ class TestUninstallCommand:
 class TestListCommand:
     """Test `list` CLI command."""
 
-    def test_list_all(self, tmp_path):
+    def test_list_all(self, tmp_path, capsys):
         """Should list all tools."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="list-tool",
+            display_name="List Tool",
             description="test",
             install_type="pip",
-            install_spec="list",
+            install_command="pip install list-tool",
+            author="Test Author",
+            repository="https://github.com/test/list-tool",
         ))
         result = runner.invoke(app, ["list", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "list-tool" in result.output
+        captured = capsys.readouterr()
+        assert "list-tool" in captured.out
 
-    def test_list_installed_only(self, tmp_path):
+    def test_list_installed_only(self, tmp_path, capsys):
         """Should list only installed tools."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="installed",
+            display_name="Installed Tool",
             description="test",
             install_type="pip",
-            install_spec="installed",
-            installed=True,
+            install_command="pip install installed",
+            author="Test Author",
+            repository="https://github.com/test/installed",
+            is_installed=True,
         ))
         registry.add(MCPTool(
             name="not-installed",
+            display_name="Not Installed Tool",
             description="test",
             install_type="pip",
-            install_spec="ni",
-            installed=False,
+            install_command="pip install not-installed",
+            author="Test Author",
+            repository="https://github.com/test/not-installed",
+            is_installed=False,
         ))
         result = runner.invoke(app, ["list", "--installed", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "installed" in result.output
-        assert "not-installed" not in result.output
+        captured = capsys.readouterr()
+        assert "installed" in captured.out
+        assert "not-installed" not in captured.out
 
-    def test_list_empty(self, tmp_path):
+    def test_list_empty(self, tmp_path, capsys):
         """Should handle empty list."""
         reg_path = tmp_path / "registry.json"
-        Registry(registry_path=str(reg_path)).save()
+        Registry(registry_path=str(reg_path))._save()
         result = runner.invoke(app, ["list", "--registry", str(reg_path)])
         assert result.exit_code == 0
-        assert "No tools found" in result.output
+        captured = capsys.readouterr()
+        assert "No tools found" in captured.out
 
     def test_list_error(self):
         """Should handle list error."""
@@ -250,18 +286,19 @@ class TestListCommand:
 class TestConfigCommand:
     """Test `config` CLI command."""
 
-    def test_config_add(self, tmp_path):
+    def test_config_add(self, tmp_path, capsys):
         """Should add server config."""
         config_path = tmp_path / "config.json"
         result = runner.invoke(app, [
             "config", "add",
             "--config", str(config_path),
             "--name", "new-server",
-            "--command", "python",
+            "--command", sys.executable,
             "--args", "-m,server",
         ])
         assert result.exit_code == 0
-        assert "Added" in result.output
+        captured = capsys.readouterr()
+        assert "Added" in captured.out
 
     def test_config_add_missing_args(self, tmp_path):
         """Should error on missing args."""
@@ -272,21 +309,24 @@ class TestConfigCommand:
         ])
         assert result.exit_code == 1
 
-    def test_config_remove(self, tmp_path):
+    def test_config_remove(self, tmp_path, capsys):
         """Should remove server config."""
         config_path = tmp_path / "config.json"
-        from mcp_hub.config import ConfigManager, MCPConfig
+        from mcp_hub.config import ClientConfig, ConfigManager, MCPConfig
         cm = ConfigManager(config_path=str(config_path))
-        cm.add_server(MCPConfig(name="old", command="python"))
+        cm.configs["claude"] = ClientConfig(client_name="claude")
+        cm.configs["claude"].add_server(MCPConfig(name="old", command=sys.executable))
+        cm._save()
         result = runner.invoke(app, [
             "config", "remove",
             "--config", str(config_path),
             "--name", "old",
         ])
         assert result.exit_code == 0
-        assert "Removed" in result.output
+        captured = capsys.readouterr()
+        assert "Removed" in captured.out
 
-    def test_config_remove_not_found(self, tmp_path):
+    def test_config_remove_not_found(self, tmp_path, capsys):
         """Should handle remove not found."""
         config_path = tmp_path / "config.json"
         result = runner.invoke(app, [
@@ -295,35 +335,42 @@ class TestConfigCommand:
             "--name", "missing",
         ])
         assert result.exit_code == 1
-        assert "not found" in result.output.lower()
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower()
 
-    def test_config_list(self, tmp_path):
+    def test_config_list(self, tmp_path, capsys):
         """Should list servers."""
         config_path = tmp_path / "config.json"
-        from mcp_hub.config import ConfigManager, MCPConfig
+        from mcp_hub.config import ClientConfig, ConfigManager, MCPConfig
         cm = ConfigManager(config_path=str(config_path))
-        cm.add_server(MCPConfig(name="s1", command="python"))
+        cm.configs["claude"] = ClientConfig(client_name="claude")
+        cm.configs["claude"].add_server(MCPConfig(name="s1", command=sys.executable))
+        cm._save()
         result = runner.invoke(app, [
             "config", "list",
             "--config", str(config_path),
         ])
         assert result.exit_code == 0
-        assert "s1" in result.output
+        captured = capsys.readouterr()
+        assert "s1" in captured.out
 
-    def test_config_generate(self, tmp_path):
+    def test_config_generate(self, tmp_path, capsys):
         """Should generate MCP JSON."""
         config_path = tmp_path / "config.json"
-        from mcp_hub.config import ConfigManager, MCPConfig
+        from mcp_hub.config import ClientConfig, ConfigManager, MCPConfig
         cm = ConfigManager(config_path=str(config_path))
-        cm.add_server(MCPConfig(name="gen", command="python"))
+        cm.configs["claude"] = ClientConfig(client_name="claude")
+        cm.configs["claude"].add_server(MCPConfig(name="gen", command=sys.executable))
+        cm._save()
         result = runner.invoke(app, [
             "config", "generate",
             "--config", str(config_path),
         ])
         assert result.exit_code == 0
-        assert "mcpServers" in result.output
+        captured = capsys.readouterr()
+        assert "mcpServers" in captured.out
 
-    def test_config_detect(self, tmp_path, monkeypatch):
+    def test_config_detect(self, tmp_path, monkeypatch, capsys):
         """Should detect client configs."""
         config_path = tmp_path / "config.json"
         with patch("mcp_hub.cli.ConfigManager.detect_client_configs") as mock_detect:
@@ -333,26 +380,28 @@ class TestConfigCommand:
                 "--config", str(config_path),
             ])
             assert result.exit_code == 0
-            assert "claude" in result.output
+            captured = capsys.readouterr()
+            assert "claude" in captured.out
 
-    def test_config_auto(self, tmp_path, monkeypatch):
+    def test_config_auto(self, tmp_path, monkeypatch, capsys):
         """Should auto-configure client."""
         config_path = tmp_path / "config.json"
-        with patch("mcp_hub.cli.ConfigManager.auto_configure") as mock_auto:
-            mock_auto.return_value = MagicMock(
-                client="claude",
-                config_path="/path",
-            )
+        with patch("mcp_hub.cli.ConfigManager.auto_configure") as mock_auto, \
+             patch("mcp_hub.cli.ConfigManager.get_client_config_path") as mock_path:
+            mock_auto.return_value = {"claude": True}
+            mock_path.return_value = "/path/to/claude.json"
             result = runner.invoke(app, [
                 "config", "auto",
                 "--config", str(config_path),
+                "--tool", "server-filesystem",
                 "--client", "claude",
             ])
             assert result.exit_code == 0
-            assert "Auto-configured" in result.output
+            captured = capsys.readouterr()
+            assert "Auto-configured" in captured.out
 
-    def test_config_auto_no_client(self, tmp_path):
-        """Should error without client."""
+    def test_config_auto_no_tool(self, tmp_path):
+        """Should error without tool."""
         config_path = tmp_path / "config.json"
         result = runner.invoke(app, [
             "config", "auto",
@@ -379,15 +428,18 @@ class TestConfigCommand:
 class TestScanCommand:
     """Test `scan` CLI command."""
 
-    def test_scan_tool(self, tmp_path, monkeypatch):
+    def test_scan_tool(self, tmp_path, monkeypatch, capsys):
         """Should scan a tool."""
         reg_path = tmp_path / "registry.json"
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="scan-me",
+            display_name="Scan Me",
             description="test",
             install_type="pip",
-            install_spec="scan",
+            install_command="pip install scan-me",
+            author="Test Author",
+            repository="https://github.com/test/scan-me",
             permissions=["filesystem:read"],
         ))
         with patch("mcp_hub.cli.SecurityScanner") as mock_scanner:
@@ -399,7 +451,8 @@ class TestScanCommand:
             )
             result = runner.invoke(app, ["scan", "scan-me", "--registry", str(reg_path)])
             assert result.exit_code == 0
-            assert "Security Report" in result.output
+            captured = capsys.readouterr()
+            assert "Security Report" in captured.out
 
     def test_scan_quick(self, tmp_path, monkeypatch):
         """Should do quick scan."""
@@ -407,9 +460,12 @@ class TestScanCommand:
         registry = Registry(registry_path=str(reg_path))
         registry.add(MCPTool(
             name="quick-scan",
+            display_name="Quick Scan",
             description="test",
             install_type="pip",
-            install_spec="quick",
+            install_command="pip install quick-scan",
+            author="Test Author",
+            repository="https://github.com/test/quick-scan",
         ))
         with patch("mcp_hub.cli.SecurityScanner") as mock_scanner:
             mock_scanner.return_value.quick_scan.return_value = MagicMock(
@@ -425,13 +481,14 @@ class TestScanCommand:
             ])
             assert result.exit_code == 0
 
-    def test_scan_not_found(self, tmp_path):
+    def test_scan_not_found(self, tmp_path, capsys):
         """Should handle tool not found."""
         reg_path = tmp_path / "registry.json"
-        Registry(registry_path=str(reg_path)).save()
+        Registry(registry_path=str(reg_path))._save()
         result = runner.invoke(app, ["scan", "missing", "--registry", str(reg_path)])
         assert result.exit_code == 1
-        assert "not found" in result.output.lower()
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower()
 
     def test_scan_error(self):
         """Should handle scan error."""
@@ -446,7 +503,7 @@ class TestCLIErrorHandling:
     def test_no_command(self):
         """Should show help with no command."""
         result = runner.invoke(app, [])
-        assert result.exit_code == 0
+        assert result.exit_code == 2
         assert "MCP Hub" in result.output
 
     def test_help_flag(self):

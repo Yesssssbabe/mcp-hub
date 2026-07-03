@@ -120,6 +120,7 @@ class TestRegistryInit:
     def test_registry_creates_directory(self, tmp_path):
         nested = tmp_path / "nested" / "deep" / "registry.json"
         registry = Registry(registry_path=str(nested))
+        registry._save()
         assert nested.parent.exists()
 
 
@@ -272,7 +273,7 @@ class TestRegistryInstalled:
         assert tmp_registry_with_data.is_installed("nonexistent") is False
 
     def test_get_install_path(self, tmp_registry_with_data):
-        assert tmp_registry_with_data.get_install_path("tool-a") == "/tmp/mcp/tools/tool-a"
+        assert tmp_registry_with_data.get_install_path("tool-a") == "/fake/tmp/path/tool-a"
         assert tmp_registry_with_data.get_install_path("tool-b") is None
 
     def test_mark_installed(self, tmp_registry_with_data):
@@ -334,12 +335,35 @@ class TestRegistryEdgeCases:
 
     def test_very_long_name(self, tmp_registry):
         long_name = "a" * 1000
-        tool = make_tool(name=long_name, display_name="Long")
-        tmp_registry.add(tool)
-        assert long_name in tmp_registry
+        with pytest.raises(ValueError):
+            make_tool(name=long_name, display_name="Long")
 
     def test_unicode(self, tmp_registry):
-        tool = make_tool(name="中文工具", display_name="中文")
-        tmp_registry.add(tool)
-        assert "中文工具" in tmp_registry
-        assert tmp_registry.get("中文工具").display_name == "中文"
+        with pytest.raises(ValueError):
+            make_tool(name="中文工具", display_name="中文")
+
+
+class TestRegistryConcurrency:
+    """Test concurrent registry operations."""
+
+    def test_concurrent_add_and_save(self, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+        registry_path = tmp_path / "registry.json"
+        registry = Registry(registry_path=str(registry_path))
+
+        def worker(i):
+            try:
+                registry.add(make_tool(name=f"tool-{i}", display_name=f"Tool {i}"))
+                registry._save()
+                return True
+            except Exception:
+                return False
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(worker, range(20)))
+
+        assert all(results)
+        # File should be valid JSON after all concurrent writes
+        with open(registry_path, "r") as f:
+            data = json.load(f)
+        assert len(data.get("tools", [])) == 20

@@ -591,6 +591,88 @@ mcp-hub install <tool> --no-scan
 
 ---
 
+## 密钥管理
+
+MCP Hub 使用操作系统原生钥匙串（OS Keychain）管理 API 密钥和 Token，避免在客户端配置文件中以明文存储敏感凭证。
+
+### 为什么需要密钥管理
+
+在旧版本中，工具注册表的 `mcp_config_template.env` 字段可能包含 `GITHUB_TOKEN`、`AWS_ACCESS_KEY_ID`、`FIRECRAWL_API_KEY` 等敏感值，并在安装时直接写入 `~/.cursor/mcp.json` 或 `~/.config/claude/claude_desktop_config.json`。这带来以下风险：
+
+- 配置文件权限不当（如 `644`）时，其他用户可读取密钥。
+- 明文存储易被恶意程序扫描窃取。
+- 密钥泄露后难以追溯和轮换。
+
+### 密钥引用格式
+
+MCP Hub 采用**引用标记**替代实际密钥值写入配置文件：
+
+```json
+{
+  "mcpServers": {
+    "firecrawl": {
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp"],
+      "env": {
+        "FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+运行时由 MCP Hub 或 AI 客户端通过 `SecretManager` 从 OS 钥匙串解析 `${SECRET_NAME}` 为实际值。
+
+### 存储位置
+
+| 操作系统 | 后端服务 |
+|----------|----------|
+| macOS | Keychain |
+| Windows | Credential Manager |
+| Linux | Secret Service / kwallet |
+
+如果未安装 `keyring` 库，MCP Hub 会降级到内存存储并发出警告，但强烈建议安装以持久化保护：
+
+```bash
+pip install keyring
+```
+
+### CLI 命令
+
+```bash
+# 安全存储密钥（交互式输入）
+mcp-hub secrets set GITHUB_TOKEN
+
+# 安全存储密钥（命令行传入，不推荐）
+mcp-hub secrets set FIRECRAWL_API_KEY "your-api-key"
+
+# 查看密钥（仅显示前 8 位）
+mcp-hub secrets get GITHUB_TOKEN
+
+# 列出已存储的密钥
+mcp-hub secrets list
+
+# 删除密钥
+mcp-hub secrets delete GITHUB_TOKEN
+```
+
+### 配置文件权限
+
+写入客户端配置文件时，MCP Hub 强制设置权限为 `0o600`（仅所有者可读写），防止其他用户读取其中的密钥引用或解析后的值。
+
+### 迁移建议
+
+如果你已有明文密钥写在配置文件中，建议按以下步骤迁移：
+
+1. 将密钥导入 OS 钥匙串：
+   ```bash
+   mcp-hub secrets set GITHUB_TOKEN "ghp_xxx"
+   ```
+2. 重新安装或更新工具，使配置文件中 `env` 值变为 `${GITHUB_TOKEN}`。
+3. 删除旧配置文件中可能残留的明文密钥备份。
+
+---
+
 ## 安全审计日志
 
 MCP Hub 记录所有安全相关的操作：

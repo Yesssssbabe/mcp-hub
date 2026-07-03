@@ -1,0 +1,40 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # 每周一 UTC 02:00 自动运行
+    - cron: "0 2 * * 1"
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.8.0
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-root --sync
+
+      - name: Export requirements.txt
+        run: |
+          poetry export -f requirements.txt --without-hashes -o requirements.txt
+
+      - name: Run pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --desc

@@ -1,6 +1,7 @@
 """Tests for mcp_hub.installer module."""
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,9 +53,9 @@ class TestInstallResult:
 class TestInstallerInit:
     """Test Installer initialization."""
 
-    def test_init_default(self):
-        installer = Installer()
-        assert installer.install_dir.endswith(".mcp-hub/installed")
+    def test_init_default(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path / "install"))
+        assert installer.install_dir.endswith("install")
 
     def test_init_custom_install_dir(self, tmp_path):
         installer = Installer(install_dir=str(tmp_path))
@@ -97,7 +98,12 @@ class TestInstallerInstall:
 
     def test_install_npm_mock(self, tmp_path, monkeypatch):
         registry = Registry(registry_path=str(tmp_path / "registry.json"))
-        registry.add(make_tool(name="npm-tool", install_type="npm"))
+        registry.add(make_tool(
+            name="npm-tool",
+            install_type="npm",
+            is_installed=True,
+            install_path=str(tmp_path / "npm-tool"),
+        ))
         installer = Installer(install_dir=str(tmp_path))
         installer.registry = registry
         monkeypatch.setattr(
@@ -110,7 +116,13 @@ class TestInstallerInstall:
 
     def test_install_pip_mock(self, tmp_path, monkeypatch):
         registry = Registry(registry_path=str(tmp_path / "registry.json"))
-        registry.add(make_tool(name="pip-tool", install_type="pip", install_command="pip install x"))
+        registry.add(make_tool(
+            name="pip-tool",
+            install_type="pip",
+            install_command="pip install x",
+            is_installed=True,
+            install_path=str(tmp_path / "pip-tool"),
+        ))
         installer = Installer(install_dir=str(tmp_path))
         installer.registry = registry
         monkeypatch.setattr(
@@ -123,7 +135,13 @@ class TestInstallerInstall:
 
     def test_install_docker_mock(self, tmp_path, monkeypatch):
         registry = Registry(registry_path=str(tmp_path / "registry.json"))
-        registry.add(make_tool(name="docker-tool", install_type="docker", install_command="docker pull x"))
+        registry.add(make_tool(
+            name="docker-tool",
+            install_type="docker",
+            install_command="docker pull x",
+            is_installed=True,
+            install_path=str(tmp_path / "docker-tool"),
+        ))
         installer = Installer(install_dir=str(tmp_path))
         installer.registry = registry
         monkeypatch.setattr(
@@ -293,6 +311,7 @@ class TestInstallerVerifyInstallation:
         installer.registry = registry
         (tmp_path / "npm-verify").mkdir()
         (tmp_path / "npm-verify" / "node_modules").mkdir()
+        (tmp_path / "npm-verify" / "node_modules" / "pkg").write_text("x")
         assert installer.verify_installation("npm-verify") is True
 
 
@@ -347,9 +366,13 @@ class TestInstallerRunCommand:
     """Test _run_command."""
 
     def test_run_command_success(self, tmp_path, monkeypatch):
+        from unittest.mock import create_autospec
+        import subprocess
+
         installer = Installer(install_dir=str(tmp_path))
         mock = MagicMock(returncode=0, stdout="out", stderr="err")
-        monkeypatch.setattr("mcp_hub.installer.subprocess.run", lambda *a, **k: mock)
+        mock_run = create_autospec(subprocess.run, return_value=mock)
+        monkeypatch.setattr("mcp_hub.installer.subprocess.run", mock_run)
         rc, out, err = installer._run_command(["echo", "hi"])
         assert rc == 0
         assert out == "out"
@@ -394,3 +417,260 @@ class TestInstallerLog:
     def test_get_install_log_missing(self, tmp_path):
         installer = Installer(install_dir=str(tmp_path))
         assert installer.get_install_log("missing") is None
+
+
+class TestInstallerGit:
+    """Test _install_git method."""
+
+    def test_install_git_no_repo(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="git-tool")
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is False
+        assert "No git_repo" in result.message
+
+    def test_install_git_clone_failure(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="git-tool",
+            git_repo="https://github.com/x/y",
+            install_command=["true"],
+        )
+        monkeypatch.setattr(
+            installer, "_run_command",
+            lambda cmd, cwd=None, env=None, timeout=300: (1, "", "clone failed")
+        )
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is False
+        assert "clone failed" in result.message
+
+    def test_install_git_post_clone_failure(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="git-tool",
+            git_repo="https://github.com/x/y",
+            install_command=["make", "install"],
+        )
+        def mock_run(cmd, cwd=None, env=None, timeout=300):
+            if any("clone" in str(c) for c in cmd):
+                return (0, "ok", "")
+            return (1, "", "make failed")
+        monkeypatch.setattr(installer, "_run_command", mock_run)
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is False
+        assert "Post-clone" in result.message or "install command" in result.message.lower()
+
+    def test_install_git_success(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="git-tool",
+            git_repo="https://github.com/x/y",
+            install_command=["true"],
+        )
+        monkeypatch.setattr(
+            installer, "_run_command",
+            lambda cmd, cwd=None, env=None, timeout=300: (0, "ok", "")
+        )
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is True
+
+
+class TestInstallerBinary:
+    """Test _install_binary method."""
+
+    def test_install_binary_no_url(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="bin-tool")
+        result = installer._install_binary(tool, str(tmp_path / "bin-tool"))
+        assert result.success is False
+        assert "No binary_url" in result.message
+
+    def test_install_binary_not_https(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="bin-tool", binary_url="http://example.com/bin")
+        result = installer._install_binary(tool, str(tmp_path / "bin-tool"))
+        assert result.success is False
+        assert "HTTPS" in result.message
+
+    def test_install_binary_download_failure(self, tmp_path, monkeypatch):
+        import urllib.error
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="bin-tool", binary_url="https://example.com/bin.tar.gz")
+        def raise_error(*a, **k):
+            raise urllib.error.URLError("network down")
+        class FailingOpener:
+            def open(self, *a, **k):
+                raise_error()
+        monkeypatch.setattr(
+            "mcp_hub.installer.urllib.request.build_opener",
+            lambda *a, **k: FailingOpener()
+        )
+        result = installer._install_binary(tool, str(tmp_path / "bin-tool"))
+        assert result.success is False
+        assert "Failed to download" in result.message
+
+    def test_install_binary_success(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="bin-tool", binary_url="https://example.com/bin")
+        class MockResponse:
+            def __init__(self, data):
+                self._data = data
+                self._pos = 0
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    chunk = self._data[self._pos:]
+                    self._pos = len(self._data)
+                    return chunk
+                chunk = self._data[self._pos:self._pos + size]
+                self._pos += len(chunk)
+                return chunk
+        class MockOpener:
+            def open(self, *a, **k):
+                return MockResponse(b"binary data")
+        monkeypatch.setattr(
+            "mcp_hub.installer.urllib.request.build_opener",
+            lambda *a, **k: MockOpener()
+        )
+        result = installer._install_binary(tool, str(tmp_path / "bin-tool"))
+        assert result.success is True
+        assert "Binary downloaded" in result.message
+
+    def test_install_binary_zip_extraction(self, tmp_path, monkeypatch):
+        import zipfile
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="zip-tool", binary_url="https://example.com/tool.zip")
+        zip_path = str(tmp_path / "tool.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("hello.txt", "hello world")
+        class MockResponse:
+            def __init__(self, data):
+                self._data = data
+                self._pos = 0
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    chunk = self._data[self._pos:]
+                    self._pos = len(self._data)
+                    return chunk
+                chunk = self._data[self._pos:self._pos + size]
+                self._pos += len(chunk)
+                return chunk
+        class MockOpener:
+            def open(self, *a, **k):
+                with open(zip_path, "rb") as f:
+                    return MockResponse(f.read())
+        monkeypatch.setattr(
+            "mcp_hub.installer.urllib.request.build_opener",
+            lambda *a, **k: MockOpener()
+        )
+        target = str(tmp_path / "zip-tool")
+        result = installer._install_binary(tool, target)
+        assert result.success is True
+        assert os.path.exists(os.path.join(target, "hello.txt"))
+
+
+class TestInstallerExtractArchive:
+    """Test _extract_archive method."""
+
+    def test_extract_archive_zip(self, tmp_path):
+        import zipfile
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="zip-tool")
+        target_dir = str(tmp_path / "extract")
+        os.makedirs(target_dir, exist_ok=True)
+        zip_path = str(tmp_path / "test.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("hello.txt", "hello world")
+        result = installer._extract_archive(tool, target_dir, zip_path, "zip")
+        assert result.success is True
+        assert os.path.exists(os.path.join(target_dir, "hello.txt"))
+
+    def test_extract_archive_tgz(self, tmp_path):
+        import tarfile
+        import io as io_module
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="tgz-tool")
+        target_dir = str(tmp_path / "extract")
+        os.makedirs(target_dir, exist_ok=True)
+        tgz_path = str(tmp_path / "test.tar.gz")
+        with tarfile.open(tgz_path, "w:gz") as tf:
+            data = b"hello world"
+            info = tarfile.TarInfo(name="hello.txt")
+            info.size = len(data)
+            tf.addfile(info, io_module.BytesIO(data))
+        result = installer._extract_archive(tool, target_dir, tgz_path, "tar.gz")
+        assert result.success is True
+        assert os.path.exists(os.path.join(target_dir, "hello.txt"))
+
+    def test_extract_archive_bad_zip(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="bad-zip")
+        bad_path = str(tmp_path / "bad.zip")
+        Path(bad_path).write_text("not a zip")
+        result = installer._extract_archive(tool, str(tmp_path / "extract"), bad_path, "zip")
+        assert result.success is False
+
+
+class TestInstallerCleanup:
+    """Test _cleanup_on_failure method."""
+
+    def test_cleanup_on_failure_removes_dir(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        target_dir = tmp_path / "partial"
+        target_dir.mkdir()
+        (target_dir / "file.txt").write_text("data")
+        tool = make_tool(name="clean-me")
+        installer._cleanup_on_failure("clean-me", str(target_dir), tool)
+        assert not target_dir.exists()
+
+    def test_cleanup_on_failure_no_dir(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        target_dir = str(tmp_path / "nonexistent")
+        tool = make_tool(name="clean-me")
+        # Should not raise
+        installer._cleanup_on_failure("clean-me", target_dir, tool)
+        assert True
+
+    def test_cleanup_on_failure_registry_cleanup_failure(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        target_dir = tmp_path / "partial"
+        target_dir.mkdir()
+        tool = make_tool(name="clean-me")
+        monkeypatch.setattr(
+            installer.registry, "mark_uninstalled",
+            lambda name: (_ for _ in ()).throw(OSError("registry locked"))
+        )
+        # Should not raise; error is logged
+        installer._cleanup_on_failure("clean-me", str(target_dir), tool)
+        assert not target_dir.exists()
+
+
+class TestInstallerConcurrency:
+    """Test concurrent installer operations."""
+
+    def test_concurrent_log_write(self, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+        installer = Installer(install_dir=str(tmp_path))
+
+        def worker(i):
+            try:
+                installer._write_log("concurrent-tool", stdout=f"line {i}\n")
+                return True
+            except Exception:
+                return False
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(worker, range(50)))
+
+        assert all(results)
+        log = installer.get_install_log("concurrent-tool")
+        assert log is not None
+        assert "line 0" in log
+        assert "line 49" in log
