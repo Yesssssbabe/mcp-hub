@@ -7,6 +7,8 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](https://docs.pytest.org/)
 
+> [English README](README_EN.md) | 中文文档
+
 ---
 
 ## 目录
@@ -152,6 +154,7 @@ mcp-hub init [OPTIONS]
 Options:
   --registry PATH   自定义注册表路径
   --config PATH     自定义配置文件路径
+  --config-dir PATH 自定义配置目录
   --force           强制重新初始化，覆盖现有配置
 ```
 
@@ -162,10 +165,10 @@ Options:
 mcp-hub init
 
 # 使用自定义注册表路径
-mcp-hub init --registry /path/to/registry.json
+mcp-hub init --registry ~/.config/mcp-hub/custom-registry.json
 
 # 使用自定义配置文件路径
-mcp-hub init --config /path/to/config.json
+mcp-hub init --config ~/.config/mcp-hub/custom-config.json
 
 # 强制重新初始化
 mcp-hub init --force
@@ -256,6 +259,7 @@ Arguments:
   tool          工具名称
 
 Options:
+  --base-dir PATH     自定义安装目录
   --yes, -y           跳过确认提示
   --purge             彻底删除，包括配置和数据文件
 ```
@@ -333,7 +337,7 @@ Options:
 mcp-hub config list
 
 # 添加服务器配置
-mcp-hub config add --client claude --name filesystem --command /usr/bin/npx --args "-y,@modelcontextprotocol/server-filesystem"
+mcp-hub config add --client claude --name filesystem --command npx --args "-y,@modelcontextprotocol/server-filesystem"
 
 # 添加带环境变量的配置
 mcp-hub config add --client claude --name postgres --command npx --env DATABASE_URL=postgres://localhost/db
@@ -351,10 +355,10 @@ mcp-hub config show
 mcp-hub config validate --client claude
 
 # 导出配置备份
-mcp-hub config export --client claude --export ./claude-mcp-backup.json
+mcp-hub config export --client claude --export ~/.config/mcp-hub/exports/claude-backup.json
 
 # 导入配置
-mcp-hub config import --client claude --import ./claude-mcp-backup.json
+mcp-hub config import --client claude --import ~/.config/mcp-hub/exports/claude-backup.json
 
 # 自动配置工具到客户端
 mcp-hub config auto --client claude --tool server-filesystem
@@ -415,12 +419,12 @@ MCP Hub 会自动检测并管理以下客户端的 MCP 配置：
 
 | 客户端 | 配置文件路径 |
 |--------|-------------|
-| **Claude Desktop** | `~/.config/claude/claude_desktop_config.json` (macOS/Linux) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
-| **Cursor** | `~/.cursor/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cursor\mcp.json` (Windows) |
-| **Cline** | `~/.cline/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
-| **GitHub Copilot** | VSCode 设置中的 `github.copilot.mcp` 配置 |
-| **VSCode** | `~/.vscode/mcp.json` (macOS/Linux) <br> `%APPDATA%\Code\User\mcp.json` (Windows) |
-| **Windsurf** | `~/.windsurf/mcp.json` (macOS/Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
+| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) <br> `~/.config/claude/claude_desktop_config.json` (Linux) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
+| **Cursor** | `~/.cursor/mcp.json` (macOS) <br> `~/.config/Cursor/mcp.json` (Linux) <br> `%APPDATA%\Cursor\mcp.json` (Windows) |
+| **Cline** | `~/.cline/mcp.json` (macOS) <br> `~/.config/Cline/mcp.json` (Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
+| **GitHub Copilot** | `~/.github/copilot/mcp.json` (macOS) <br> `~/.config/GitHub Copilot/mcp.json` (Linux) <br> `%APPDATA%\GitHub Copilot\mcp.json` (Windows) |
+| **VSCode** | `~/.vscode/mcp.json` (macOS) <br> `~/.config/Code/User/mcp.json` (Linux) <br> `%APPDATA%\Code\User\mcp.json` (Windows) |
+| **Windsurf** | `~/.windsurf/mcp.json` (macOS) <br> `~/.config/Windsurf/mcp.json` (Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
 
 ### 手动配置
 

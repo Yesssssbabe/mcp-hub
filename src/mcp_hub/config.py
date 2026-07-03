@@ -851,9 +851,7 @@ class ConfigManager:
                 )
 
             if output_path:
-                # Reject user-provided absolute paths or paths with parent traversal
-                if os.path.isabs(output_path):
-                    raise ConfigError("Absolute paths are not allowed for export")
+                # Allow absolute paths within allowed export directory
                 if ".." in output_path:
                     raise ConfigError("Path traversal sequences are not allowed")
                 out_path = _validate_export_path(output_path)

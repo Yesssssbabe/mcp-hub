@@ -6,6 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](https://docs.pytest.org/)
 
+> [中文文档](README.md) | English Documentation
+
 ---
 
 ## Table of Contents
@@ -358,8 +360,8 @@ Options:
 # List all client configurations
 mcp-hub config list
 
-# Add server configuration
-mcp-hub config add --client claude --name filesystem --command /usr/bin/npx --args "-y,@modelcontextprotocol/server-filesystem"
+# 添加服务器配置
+mcp-hub config add --client claude --name filesystem --command npx --args "-y,@modelcontextprotocol/server-filesystem"
 
 # Add with environment variables
 mcp-hub config add --client claude --name postgres --command npx --env DATABASE_URL=postgres://localhost/db
@@ -377,10 +379,10 @@ mcp-hub config show
 mcp-hub config validate --client claude
 
 # Export configuration
-mcp-hub config export --client claude --export ./claude-mcp-backup.json
+mcp-hub config export --client claude --export ~/.config/mcp-hub/exports/claude-backup.json
 
 # Import configuration
-mcp-hub config import --client claude --import ./claude-mcp-backup.json
+mcp-hub config import --client claude --import ~/.config/mcp-hub/exports/claude-backup.json
 
 # Auto-configure a tool
 mcp-hub config auto --client claude --tool server-filesystem
@@ -450,12 +452,12 @@ MCP Hub automatically detects and manages MCP configurations for the following c
 
 | Client | Config File Path |
 |--------|------------------|
-| **Claude Desktop** | `~/.config/claude/claude_desktop_config.json` (macOS/Linux) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
-| **Cursor** | `~/.cursor/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cursor\mcp.json` (Windows) |
-| **Cline** | `~/.config/cline/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
-| **GitHub Copilot** | VSCode settings `github.copilot.mcp` config |
-| **VSCode** | `~/.vscode/mcp.json` (macOS/Linux) <br> `%APPDATA%\Code\User\mcp.json` (Windows) |
-| **Windsurf** | `~/.config/windsurf/mcp.json` (macOS/Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
+| **Claude Desktop** | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) <br> `~/.config/claude/claude_desktop_config.json` (Linux) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
+| **Cursor** | `~/.cursor/mcp.json` (macOS) <br> `~/.config/Cursor/mcp.json` (Linux) <br> `%APPDATA%\Cursor\mcp.json` (Windows) |
+| **Cline** | `~/.cline/mcp.json` (macOS) <br> `~/.config/Cline/mcp.json` (Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
+| **GitHub Copilot** | `~/.github/copilot/mcp.json` (macOS) <br> `~/.config/GitHub Copilot/mcp.json` (Linux) <br> `%APPDATA%\GitHub Copilot\mcp.json` (Windows) |
+| **VSCode** | `~/.vscode/mcp.json` (macOS) <br> `~/.config/Code/User/mcp.json` (Linux) <br> `%APPDATA%\Code\User\mcp.json` (Windows) |
+| **Windsurf** | `~/.windsurf/mcp.json` (macOS) <br> `~/.config/Windsurf/mcp.json` (Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
 
 ### Manual Configuration
 
@@ -483,10 +485,10 @@ If you need to manually edit configurations, MCP Hub uses the standard MCP confi
 
 ```bash
 # Export current configuration to file
-mcp-hub config export --client claude --export ./mcp-config-backup.json
+mcp-hub config export --client claude --export ~/.config/mcp-hub/exports/mcp-config-backup.json
 
 # Import configuration from file (merge mode)
-mcp-hub config import --client claude --import ./mcp-config-backup.json
+mcp-hub config import --client claude --import ~/.config/mcp-hub/exports/mcp-config-backup.json
 ```
 
 ### Environment Variables
@@ -632,8 +634,8 @@ mcp-hub/
 │   ├── test_utils.py      # Utility tests
 │   └── conftest.py        # Shared fixtures
 ├── pyproject.toml         # Project configuration and dependencies
-├── README.md              # This file (English)
-└── README_CN.md           # Chinese version
+├── README_EN.md           # This file (English)
+└── README.md              # Chinese version
 ```
 
 ### Core Module Responsibilities

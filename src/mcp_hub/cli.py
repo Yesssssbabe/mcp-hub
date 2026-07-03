@@ -229,7 +229,7 @@ MAX_INPUT_LENGTH = 256
 MAX_NAME_LENGTH = 64
 MAX_ARGS_LENGTH = 1024
 
-_SHELL_METACHARS = re.compile(r'[;|&$`\(\)<>{}/\n\r]')
+_SHELL_METACHARS = re.compile(r'[;|&$`\(\)<{}\n\r]')
 
 # Command-specific metacharacters: allow path separators since commands must be absolute paths.
 _CMD_METACHARS = re.compile(r'[;|&$`\(\)<>{}\n\r]')
@@ -280,6 +280,8 @@ def _validate_args(args: List[str]) -> List[str]:
     for arg in args:
         if arg is None or len(arg) > MAX_INPUT_LENGTH:
             raise MCPHubError(f"Argument too long or empty (max {MAX_INPUT_LENGTH} chars)")
+        if ".." in arg:
+            raise MCPHubError(f"Argument contains path traversal: {arg}")
         if _SHELL_METACHARS.search(arg):
             raise MCPHubError(f"Argument contains forbidden shell characters: {arg}")
         safe_args.append(arg)
@@ -611,8 +613,17 @@ def uninstall(
         if purge:
             cm = ConfigManager()
             purged = False
+            # FIX: resolve mcp_server_name from registry for config removal
+            mcp_server_name = sanitized_name
+            try:
+                registry = Registry()
+                tool = registry.get(sanitized_name)
+                if tool:
+                    mcp_server_name = tool.mcp_server_name or tool.name
+            except Exception:
+                pass  # fallback to sanitized_name
             for client in SUPPORTED_CLIENTS:
-                if cm.remove_server(client, sanitized_name):
+                if cm.remove_server(client, mcp_server_name):
                     console.info(f"Removed configuration from {client}")
                     purged = True
             if purged:
@@ -652,8 +663,8 @@ def list_tools(
             tools = registry.list_tools()
 
         if category:
-            cat_lower = category.lower()
-            tools = [tool for tool in tools if any(cat_lower == cat.lower() for cat in tool.categories)]
+            cat_normalized = category.lower().replace(" ", "")
+            tools = [tool for tool in tools if any(cat_normalized == cat.lower().replace(" ", "") for cat in tool.categories)]
 
         if not tools:
             rich_console.print("[yellow]No tools found[/yellow]")
@@ -694,7 +705,7 @@ def list_tools(
         raise typer.Exit(1)
 
 
-@app.command(epilog="Examples:\n  mcp-hub config add --name fs --command /usr/bin/npx --args '-y,@modelcontextprotocol/server-filesystem'\n  mcp-hub config list --client claude\n  mcp-hub config generate --client claude\n  mcp-hub config detect\n  mcp-hub config validate --client cursor\n  mcp-hub config show\n  mcp-hub config import --import ./backup.json --client claude\n  mcp-hub config export --client claude --export ./claude_backup.json")
+@app.command(epilog="Examples:\n  mcp-hub config add --name fs --command npx --args '-y,@modelcontextprotocol/server-filesystem'\n  mcp-hub config list --client claude\n  mcp-hub config generate --client claude\n  mcp-hub config detect\n  mcp-hub config validate --client cursor\n  mcp-hub config show\n  mcp-hub config import --import ~/.config/mcp-hub/exports/backup.json --client claude\n  mcp-hub config export --client claude --export ~/.config/mcp-hub/exports/claude-backup.json")
 def config(
     action: Annotated[str, typer.Argument(help="Action: add, remove, list, show, generate, detect, auto, validate, import, export")],
     client: Annotated[Optional[str], typer.Option("--client", "-c", help="Target client (claude, cursor, cline, copilot, vscode, windsurf)")] = None,
