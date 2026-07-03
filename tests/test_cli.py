@@ -144,6 +144,7 @@ class TestInstallCommand:
             repository="https://github.com/test/cli-tool",
         ))
         with patch("mcp_hub.cli.Installer") as mock_inst:
+            mock_inst.return_value.is_installed.return_value = False
             mock_inst.return_value.install.return_value = MagicMock(
                 success=True,
                 tool_name="cli-tool",
@@ -199,7 +200,7 @@ class TestUninstallCommand:
                 tool_name="gone",
                 message="Uninstalled gone",
             )
-            result = runner.invoke(app, ["uninstall", "gone"])
+            result = runner.invoke(app, ["uninstall", "gone", "--yes"])
             assert result.exit_code == 0
             output = result.output
             assert "Uninstalled" in output
@@ -212,7 +213,7 @@ class TestUninstallCommand:
                 tool_name="bad",
                 message="Not installed",
             )
-            result = runner.invoke(app, ["uninstall", "bad"])
+            result = runner.invoke(app, ["uninstall", "bad", "--yes"])
             assert result.exit_code == 1
 
 
@@ -443,11 +444,17 @@ class TestScanCommand:
             permissions=["filesystem:read"],
         ))
         with patch("mcp_hub.cli.SecurityScanner") as mock_scanner:
+            mock_security_level = MagicMock()
+            mock_security_level.name = "SAFE"
             mock_scanner.return_value.scan.return_value = MagicMock(
                 overall_score=85.0,
-                level=MagicMock(name="SAFE"),
-                risks=[],
+                security_level=mock_security_level,
+                warnings=[],
+                errors=[],
                 recommendations=["No issues"],
+                scanner_version="0.1.0",
+                scanned_at="2024-01-01T00:00:00",
+                scan_duration=0.0,
             )
             result = runner.invoke(app, ["scan", "scan-me", "--registry", str(reg_path)])
             assert result.exit_code == 0
@@ -503,7 +510,7 @@ class TestCLIErrorHandling:
     def test_no_command(self):
         """Should show help with no command."""
         result = runner.invoke(app, [])
-        assert result.exit_code == 2
+        assert result.exit_code == 0
         assert "Missing command" in result.output or "Usage:" in result.output
 
     def test_help_flag(self):

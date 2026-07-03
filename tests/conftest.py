@@ -4,7 +4,7 @@ import copy
 import json
 import os
 
-# Allow tests to use temporary paths outside ~/.mcp-hub.
+# Allow tests to use temporary paths outside ~/.config/mcp-hub.
 os.environ.setdefault("MCP_HUB_TEST_MODE", "1")
 
 import pytest

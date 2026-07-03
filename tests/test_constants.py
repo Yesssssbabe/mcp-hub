@@ -58,15 +58,27 @@ class TestConstants:
 
     def test_default_registry_path(self):
         assert isinstance(DEFAULT_REGISTRY_PATH, Path)
-        assert str(DEFAULT_REGISTRY_PATH) == str(Path.home() / ".mcp-hub" / "registry.json")
+        expected_base = Path.home() / ".config" / "mcp-hub"
+        legacy_base = Path.home() / ".mcp-hub"
+        if legacy_base.exists() and not expected_base.exists():
+            expected_base = legacy_base
+        assert str(DEFAULT_REGISTRY_PATH) == str(expected_base / "registry.json")
 
     def test_default_config_path(self):
         assert isinstance(DEFAULT_CONFIG_PATH, Path)
-        assert str(DEFAULT_CONFIG_PATH) == str(Path.home() / ".mcp-hub" / "config.json")
+        expected_base = Path.home() / ".config" / "mcp-hub"
+        legacy_base = Path.home() / ".mcp-hub"
+        if legacy_base.exists() and not expected_base.exists():
+            expected_base = legacy_base
+        assert str(DEFAULT_CONFIG_PATH) == str(expected_base / "config.json")
 
     def test_default_data_dir(self):
         assert isinstance(DEFAULT_DATA_DIR, Path)
-        assert str(DEFAULT_DATA_DIR) == str(Path.home() / ".mcp-hub")
+        expected_base = Path.home() / ".config" / "mcp-hub"
+        legacy_base = Path.home() / ".mcp-hub"
+        if legacy_base.exists() and not expected_base.exists():
+            expected_base = legacy_base
+        assert str(DEFAULT_DATA_DIR) == str(expected_base)
 
     def test_supported_clients_is_tuple(self):
         assert isinstance(SUPPORTED_CLIENTS, tuple)

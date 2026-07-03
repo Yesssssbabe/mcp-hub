@@ -1,5 +1,6 @@
 """MCP Hub constants and exceptions."""
 
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, Final, List, Optional, Tuple, Union
@@ -41,7 +42,17 @@ class ConfigError(MCPHubError):
 # ──────────────────────────────────────────
 # Path Constants
 # ──────────────────────────────────────────
-DEFAULT_DATA_DIR: Final[Path] = Path.home() / ".mcp-hub"
+# FIX-08: unify to ~/.config/mcp-hub/ with ~/.mcp-hub/ backward compat
+# FIX-07: read MCP_HUB_CONFIG_DIR env var
+_env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+if _env_dir:
+    _default_data_dir = Path(_env_dir).expanduser().resolve()
+else:
+    _default_data_dir = Path.home() / ".config" / "mcp-hub"
+    if (Path.home() / ".mcp-hub").exists() and not _default_data_dir.exists():
+        _default_data_dir = Path.home() / ".mcp-hub"
+
+DEFAULT_DATA_DIR: Final[Path] = _default_data_dir
 DEFAULT_REGISTRY_PATH: Final[Path] = DEFAULT_DATA_DIR / "registry.json"
 DEFAULT_CONFIG_PATH: Final[Path] = DEFAULT_DATA_DIR / "config.json"
 

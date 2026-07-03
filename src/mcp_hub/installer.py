@@ -190,7 +190,7 @@ class Installer:
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
     def __init__(self, install_dir: Optional[str] = None) -> None:
-        self.install_dir = install_dir or os.path.expanduser("~/.mcp-hub/installed")
+        self.install_dir = install_dir or str(DEFAULT_DATA_DIR / "installed")
         if not os.path.isabs(self.install_dir):
             raise ValueError(f"install_dir must be an absolute path: {self.install_dir}")
         self.log_dir = os.path.join(DEFAULT_DATA_DIR, "logs")

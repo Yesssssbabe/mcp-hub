@@ -113,9 +113,10 @@ class TestSecurityScannerScan:
         registry = Registry(registry_path=str(tmp_path / "reg.json"))
         registry.add(make_tool(name="quick", permissions=[]))
         scanner = SecurityScanner(registry=registry)
-        score = scanner.quick_scan("quick")
-        assert isinstance(score, int)
-        assert 0 <= score <= 100
+        report = scanner.quick_scan("quick")
+        assert isinstance(report, SecurityReport)
+        assert isinstance(report.overall_score, int)
+        assert 0 <= report.overall_score <= 100
 
     def test_scan_compare_tools(self, tmp_path):
         registry = Registry(registry_path=str(tmp_path / "reg.json"))

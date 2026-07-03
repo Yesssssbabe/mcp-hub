@@ -436,6 +436,8 @@ class MCPConfig(BaseModel):
                 result["env"] = _mask_env_values(self.env)
             else:
                 result["env"] = self.env
+        if self.description:
+            result["description"] = self.description
         return result
 
     @classmethod
@@ -505,19 +507,34 @@ class ConfigManager:
             expanded = _expand_path(config_path, allow_vars=False)
             # Test mode: allow temporary paths so the test suite can use tmp_path.
             if os.environ.get("MCP_HUB_TEST_MODE") != "1":
-                allowed_base = _expand_path(DEFAULT_DATA_DIR, allow_vars=True)
-                if not _is_safe_path(expanded, allowed_base):
+                allowed_bases = [_expand_path(DEFAULT_DATA_DIR, allow_vars=True)]
+                env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+                if env_dir:
+                    allowed_bases.append(_expand_path(env_dir, allow_vars=True))
+                if not any(
+                    _is_safe_path(expanded, allowed_base)
+                    for allowed_base in allowed_bases
+                ):
                     raise ConfigError(
-                        f"Config path must be inside {allowed_base}: {config_path}"
+                        f"Config path must be inside one of {allowed_bases}: {config_path}"
                     )
             self.config_path = expanded
             config_dir = os.path.dirname(self.config_path)
             if config_dir:
                 os.makedirs(config_dir, exist_ok=True)
         else:
-            self.config_path = _expand_path(DEFAULT_CONFIG_PATH, allow_vars=True)
+            env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+            if env_dir:
+                self.config_path = _expand_path(
+                    os.path.join(env_dir, "config.json"), allow_vars=True
+                )
+            else:
+                self.config_path = _expand_path(DEFAULT_CONFIG_PATH, allow_vars=True)
+            config_dir = os.path.dirname(self.config_path)
+            if config_dir:
+                os.makedirs(config_dir, exist_ok=True)
         self.configs: Dict[str, ClientConfig] = {}
-        self._registry = Registry()
+        self._registry: Optional[Registry] = None
         self._lock = threading.RLock()
         self._hub_lock = FileLock(self.config_path + ".lock")
         self._load()
@@ -561,57 +578,31 @@ class ConfigManager:
 
     # -- Server management ---------------------------------------------------
 
-    def add_server(self, client_name: str, tool: MCPTool) -> bool:
-        """Add an MCP server to a client's configuration.
+    def add_server_config(self, client_name: str, config: MCPConfig) -> bool:
+        """Add a manually-configured MCP server to a client's configuration.
 
-        Steps:
-        1. Get the tool's MCP config template from the registry.
-        2. Generate the MCP server config JSON.
-        3. Read the existing client config (if it exists).
-        4. Merge the new server config.
-        5. Write the updated client config.
-        6. Save the internal hub config state.
+        Similar to add_server() but accepts a pre-built MCPConfig object
+        instead of looking up a tool in the registry. This ensures that
+        add/list/remove operations use the same data model.
         """
         with self._lock:
             if client_name not in SUPPORTED_CLIENTS:
                 raise ConfigError(f"Unsupported client: {client_name}")
 
-            # 1. Build the MCP server configuration from the tool.
-            tool_config = tool.mcp_config_template
-            server_name = tool.mcp_server_name or tool.name
-            command = tool_config.command if tool_config else ""
-            args = list(tool_config.args) if tool_config else []
-            env = dict(tool_config.env) if tool_config and tool_config.env else {}
-            description = tool.description
-
-            if not command:
-                raise ConfigError(
-                    f"Tool '{tool.name}' has no command defined"
-                )
-
             # Security validation: command whitelist, args filtering, env restrictions
-            _validate_command(command)
-            _validate_args(args)
-            _validate_env(env)
+            _validate_command(config.command)
+            _validate_args(config.args)
+            _validate_env(config.env)
 
-            mcp_server = MCPConfig(
-                name=server_name,
-                command=command,
-                args=args,
-                env=env,
-                description=description,
-                enabled=True,
-            )
-
-            # 2. Resolve client config path before any mutation.
+            # Resolve client config path before any mutation.
             client_file_path = self.get_client_config_path(client_name)
             if not client_file_path:
                 raise ConfigError(
                     f"Could not determine config path for {client_name}"
                 )
 
-            # 3. Read existing client config under file lock to preserve
-            #    global settings.
+            # Read existing client config under file lock to preserve
+            # global settings.
             existing_data: Dict[str, Any] = {}
             if os.path.exists(client_file_path):
                 client_lock = FileLock(client_file_path + ".lock")
@@ -645,20 +636,20 @@ class ConfigManager:
                             pass
                         existing_data = {}
 
-            # 4. Update in-memory state.
+            # Update in-memory state.
             if client_name not in self.configs:
                 self.configs[client_name] = ClientConfig(
                     client_name=client_name
                 )
-            self.configs[client_name].add_server(mcp_server)
+            self.configs[client_name].add_server(config)
 
-            # 5. Merge: internal state is authoritative for mcpServers.
+            # Merge: internal state is authoritative for mcpServers.
             merged = existing_data.copy()
             merged["mcpServers"] = self.configs[
                 client_name
             ].to_mcp_json().get("mcpServers", {})
 
-            # 6. Persist hub config first (source of truth), then client.
+            # Persist hub config first (source of truth), then client.
             self._save()
 
         # Write client file outside self._lock to avoid nested FileLock
@@ -672,6 +663,41 @@ class ConfigManager:
         os.chmod(client_file_path, 0o600)
 
         return True
+
+    def add_server(self, client_name: str, tool: MCPTool) -> bool:
+        """Add an MCP server to a client's configuration.
+
+        Steps:
+        1. Get the tool's MCP config template from the registry.
+        2. Generate the MCP server config JSON.
+        3. Read the existing client config (if it exists).
+        4. Merge the new server config.
+        5. Write the updated client config.
+        6. Save the internal hub config state.
+        """
+        # 1. Build the MCP server configuration from the tool.
+        tool_config = tool.mcp_config_template
+        server_name = tool.mcp_server_name or tool.name
+        command = tool_config.command if tool_config else ""
+        args = list(tool_config.args) if tool_config else []
+        env = dict(tool_config.env) if tool_config and tool_config.env else {}
+        description = tool.description
+
+        if not command:
+            raise ConfigError(
+                f"Tool '{tool.name}' has no command defined"
+            )
+
+        mcp_server = MCPConfig(
+            name=server_name,
+            command=command,
+            args=args,
+            env=env,
+            description=description,
+            enabled=True,
+        )
+
+        return self.add_server_config(client_name, mcp_server)
 
     def remove_server(self, client_name: str, server_name: str) -> bool:
         """Remove an MCP server from a client's configuration."""
@@ -964,6 +990,12 @@ class ConfigManager:
 
     # -- Auto configure ------------------------------------------------------
 
+    def _get_registry(self) -> Registry:
+        """Return the internal registry, creating it lazily on first access."""
+        if self._registry is None:
+            self._registry = Registry()
+        return self._registry
+
     def auto_configure(
         self, tool_name: str, clients: Optional[List[str]] = None
     ) -> Dict[str, bool]:
@@ -972,7 +1004,7 @@ class ConfigManager:
         Looks the tool up in the registry and adds it to each target client.
         Returns a mapping of client_name -> success_boolean.
         """
-        tool = self._registry.get(tool_name)
+        tool = self._get_registry().get(tool_name)
         if not tool:
             raise ConfigError(f"Tool not found in registry: {tool_name}")
 
@@ -996,4 +1028,4 @@ class ConfigManager:
 
     def get_registry(self) -> Registry:
         """Return the internal registry instance."""
-        return self._registry
+        return self._get_registry()

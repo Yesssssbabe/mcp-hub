@@ -17,8 +17,10 @@ except ImportError:
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-DEFAULT_REGISTRY_PATH = "~/.mcp-hub/registry.json"
-ALLOWED_REGISTRY_DIR = Path.home() / ".mcp-hub"
+from mcp_hub.constants import DEFAULT_DATA_DIR
+
+DEFAULT_REGISTRY_PATH = str(DEFAULT_DATA_DIR / "registry.json")
+ALLOWED_REGISTRY_DIR = DEFAULT_DATA_DIR
 MAX_REGISTRY_SIZE = 10 * 1024 * 1024  # 10MB
 
 
@@ -181,7 +183,14 @@ class Registry:
     """Manages the MCP tool registry."""
 
     def __init__(self, registry_path: Optional[str] = None):
-        raw_path = registry_path or os.path.expanduser(DEFAULT_REGISTRY_PATH)
+        if registry_path:
+            raw_path = registry_path
+        else:
+            env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+            if env_dir:
+                raw_path = os.path.join(env_dir, "registry.json")
+            else:
+                raw_path = os.path.expanduser(DEFAULT_REGISTRY_PATH)
         self.registry_path = self._sanitize_path(raw_path)
         self.tools: Dict[str, MCPTool] = {}
         self._lock = threading.RLock()
@@ -193,14 +202,21 @@ class Registry:
         # Test mode: allow temporary paths so the test suite can use tmp_path.
         if os.environ.get("MCP_HUB_TEST_MODE") == "1":
             return str(resolved)
-        allowed = ALLOWED_REGISTRY_DIR.resolve()
-        try:
-            resolved.relative_to(allowed)
-        except ValueError:
-            raise ValueError(
-                f"Registry path must be within {allowed}, got: {resolved}"
-            )
-        return str(resolved)
+        allowed_bases = [ALLOWED_REGISTRY_DIR.resolve()]
+        env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+        if env_dir:
+            env_path = Path(env_dir).expanduser().resolve()
+            if env_path not in allowed_bases:
+                allowed_bases.append(env_path)
+        for allowed in allowed_bases:
+            try:
+                resolved.relative_to(allowed)
+                return str(resolved)
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Registry path must be within {allowed_bases[0]}, got: {resolved}"
+        )
 
     def _load(self) -> None:
         """Load registry from disk with shared file lock and corruption fallback."""
@@ -330,6 +346,8 @@ class Registry:
         # --- Input validation end ---
 
         with self._lock:
+            if not self.tools:
+                return []
             results = list(self.tools.values())
         query_lower = query.lower()
 
@@ -380,6 +398,9 @@ class Registry:
             results.sort(key=_recent_key, reverse=True)
         elif sort_key == "downloads":
             results.sort(key=lambda t: t.downloads, reverse=True)
+        elif sort_key == "relevance":
+            # Default relevance ordering: sort by stars as a proxy for popularity/relevance
+            results.sort(key=lambda t: t.stars, reverse=True)
         else:
             results.sort(key=lambda t: t.stars, reverse=True)
 
@@ -519,6 +540,14 @@ class Registry:
     def __len__(self) -> int:
         with self._lock:
             return len(self.tools)
+
+    def load_builtin_registry(self) -> None:
+        """Load built-in tools into the registry and persist."""
+        with self._lock:
+            for tool in _builtin_tools():
+                if tool.name not in self.tools:
+                    self.tools[tool.name] = tool
+            self._save()
 
     def __contains__(self, name: str) -> bool:
         with self._lock:

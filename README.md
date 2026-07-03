@@ -82,9 +82,6 @@ pip install mcp-hub
 
 # 或使用 uv
 uv tool install mcp-hub
-
-# 验证安装
-mcp-hub --version
 ```
 
 ### 初始化配置
@@ -96,7 +93,7 @@ mcp-hub init
 
 初始化后，MCP Hub 会在你的用户目录下创建配置文件夹：
 
-- **macOS/Linux**: `~/.config/mcp-hub/`
+- **macOS/Linux**: `~/.config/mcp-hub/`（若已存在 `~/.mcp-hub/` 则兼容保留）
 - **Windows**: `%APPDATA%\mcp-hub\`
 
 ### 搜索工具
@@ -106,43 +103,39 @@ mcp-hub init
 mcp-hub search filesystem
 
 # 按标签搜索
-mcp-hub search --tag database
+mcp-hub search --tags database
 
 # 限制结果数量
-mcp-hub search --limit 10 --sort downloads
+mcp-hub search --limit 10
 ```
 
 ### 安装工具
 
 ```bash
-# 安装文件系统工具，并自动配置到 Claude Desktop
-mcp-hub install @modelcontextprotocol/server-filesystem --client claude
+# 安装文件系统工具
+mcp-hub install server-filesystem
 
-# 使用 Docker 方式安装
-mcp-hub install @modelcontextprotocol/server-filesystem --method docker
-
-# 强制重新安装
-mcp-hub install @modelcontextprotocol/server-filesystem --force
+# 使用自定义安装目录
+mcp-hub install server-filesystem --base-dir /tmp/mcp-tools
 ```
+
+> **注意**：当前版本已支持 npm 作用域包名（如 `@org/package`）。
 
 ### 查看已安装工具
 
 ```bash
 # 列出所有已安装工具
 mcp-hub list --installed
-
-# 按类别筛选
-mcp-hub list --category filesystem
 ```
 
 ### 安全扫描
 
 ```bash
 # 扫描工具安全评分
-mcp-hub scan @modelcontextprotocol/server-filesystem
+mcp-hub scan server-filesystem
 
-# 获取详细扫描报告
-mcp-hub scan @modelcontextprotocol/server-filesystem --detailed
+# 快速扫描
+mcp-hub scan server-filesystem --quick
 ```
 
 ---
@@ -157,9 +150,9 @@ mcp-hub scan @modelcontextprotocol/server-filesystem --detailed
 mcp-hub init [OPTIONS]
 
 Options:
-  --force       强制重新初始化，覆盖现有配置
-  --client      指定默认客户端（claude|cursor|cline|copilot|vscode|windsurf）
-  --config-dir  自定义配置目录路径
+  --registry PATH   自定义注册表路径
+  --config PATH     自定义配置文件路径
+  --force           强制重新初始化，覆盖现有配置
 ```
 
 **示例：**
@@ -168,11 +161,14 @@ Options:
 # 标准初始化
 mcp-hub init
 
-# 设置默认客户端为 Cursor
-mcp-hub init --client cursor
+# 使用自定义注册表路径
+mcp-hub init --registry /path/to/registry.json
 
-# 使用自定义配置目录
-mcp-hub init --config-dir /path/to/custom/config
+# 使用自定义配置文件路径
+mcp-hub init --config /path/to/config.json
+
+# 强制重新初始化
+mcp-hub init --force
 ```
 
 ---
@@ -185,15 +181,15 @@ mcp-hub init --config-dir /path/to/custom/config
 mcp-hub search <query> [OPTIONS]
 
 Arguments:
-  query         搜索关键词（支持模糊匹配）
+  query         搜索关键词（支持模糊匹配，默认为空字符串）
 
 Options:
-  --tag TEXT      按标签筛选（可多次使用）
-  --category      按类别筛选
-  --limit INT     结果数量限制（默认 20）
-  --sort TEXT     排序方式：relevance|downloads|stars|updated|name
-  --json          以 JSON 格式输出
-  --installed     仅搜索已安装工具
+  --tag TEXT      按标签筛选（可多次使用，逗号分隔）
+  --category TEXT 按类别筛选
+  --limit INT          结果数量限制（默认 20）
+  --sort TEXT          排序方式：relevance、stars、name、recent、downloads
+  --json               以 JSON 格式输出
+  --registry PATH      指定注册表路径
 ```
 
 **示例：**
@@ -205,9 +201,6 @@ mcp-hub search filesystem
 # 搜索数据库工具，按下载量排序
 mcp-hub search --tag database --sort downloads --limit 10
 
-# 搜索已安装的 Git 相关工具
-mcp-hub search git --installed
-
 # JSON 输出（供脚本使用）
 mcp-hub search filesystem --json | jq '.[].name'
 ```
@@ -216,71 +209,68 @@ mcp-hub search filesystem --json | jq '.[].name'
 
 ### `mcp-hub install <tool>`
 
-安装 MCP 工具并可选配置到指定客户端。
+安装 MCP 工具。
 
 ```bash
 mcp-hub install <tool> [OPTIONS]
 
 Arguments:
-  tool          工具名称或标识符（如 @modelcontextprotocol/server-filesystem）
+  tool          工具名称（仅支持字母、数字、下划线、连字符）
 
 Options:
-  --method TEXT    安装方式：npm|pip|docker|git|binary|auto（默认 auto）
-  --client TEXT    目标客户端（可多次使用，支持 claude|cursor|cline|copilot|vscode|windsurf）
-  --force          强制重新安装（覆盖现有版本）
-  --version TEXT   指定版本号
-  --no-config      不自动配置到客户端
-  --dry-run        模拟安装，不执行实际操作
+  --method TEXT       安装方式：auto、npm、pip、docker、git、binary（默认 auto）
+  --client TEXT       目标客户端（可多次使用，支持 claude|cursor|cline|copilot|vscode|windsurf）
+  --force             强制重新安装（覆盖现有版本）
+  --dry-run           模拟安装，不执行实际操作
 ```
 
 **示例：**
 
 ```bash
-# 自动安装到 Claude
-mcp-hub install @modelcontextprotocol/server-filesystem --client claude
+# 自动安装并配置到 Claude
+mcp-hub install server-filesystem --client claude
 
-# 使用 pip 安装到多个客户端
-mcp-hub install mcp-server-sqlite --method pip --client claude --client cursor
+# 安装到多个客户端
+mcp-hub install server-filesystem --client claude --client cursor
 
-# 安装特定版本
-mcp-hub install @modelcontextprotocol/server-filesystem --version 1.2.0
+# 使用 pip 安装
+mcp-hub install server-sqlite --method pip
 
-# 仅安装不配置
-mcp-hub install @modelcontextprotocol/server-filesystem --no-config
+# 强制重新安装
+mcp-hub install server-filesystem --force
 
 # 模拟安装（预览操作）
-mcp-hub install @modelcontextprotocol/server-filesystem --dry-run
+mcp-hub install server-filesystem --dry-run
 ```
 
 ---
 
-### `mcp-hub remove <tool>`
+### `mcp-hub uninstall <tool>`
 
 卸载已安装的 MCP 工具。
 
 ```bash
-mcp-hub remove <tool> [OPTIONS]
+mcp-hub uninstall <tool> [OPTIONS]
 
 Arguments:
-  tool          工具名称或标识符
+  tool          工具名称
 
 Options:
-  --purge           彻底删除，包括配置和数据文件
-  --keep-config     保留客户端配置文件
-  --yes             跳过确认提示
+  --yes, -y           跳过确认提示
+  --purge             彻底删除，包括配置和数据文件
 ```
 
 **示例：**
 
 ```bash
-# 卸载工具
-mcp-hub remove @modelcontextprotocol/server-filesystem
-
-# 彻底删除（含配置）
-mcp-hub remove @modelcontextprotocol/server-filesystem --purge
+# 卸载工具（带确认）
+mcp-hub uninstall server-filesystem
 
 # 静默卸载
-mcp-hub remove @modelcontextprotocol/server-filesystem --yes
+mcp-hub uninstall server-filesystem --yes
+
+# 彻底删除（含配置）
+mcp-hub uninstall server-filesystem --purge
 ```
 
 ---
@@ -293,11 +283,10 @@ mcp-hub remove @modelcontextprotocol/server-filesystem --yes
 mcp-hub list [OPTIONS]
 
 Options:
-  --installed       仅列出已安装工具
-  --category TEXT   按类别筛选
-  --tag TEXT        按标签筛选
-  --json            以 JSON 格式输出
-  --outdated        仅列出有更新可用的工具
+  --installed         仅列出已安装工具
+  --category TEXT     按类别筛选
+  --json              以 JSON 格式输出
+  --registry PATH     指定注册表路径
 ```
 
 **示例：**
@@ -309,46 +298,69 @@ mcp-hub list --installed
 # 列出文件系统类别工具
 mcp-hub list --category filesystem
 
-# 列出可更新的工具
-mcp-hub list --outdated
+# JSON 输出
+mcp-hub list --json
 ```
 
 ---
 
-### `mcp-hub config`
+### `mcp-hub config <action>`
 
 管理客户端配置。
 
 ```bash
-mcp-hub config [OPTIONS]
+mcp-hub config <action> [OPTIONS]
+
+Arguments:
+  action          操作类型：add, remove, list, show, generate, detect, auto, validate, import, export
 
 Options:
-  --client TEXT     指定客户端（claude|cursor|cline|copilot|vscode|windsurf）
-  --list            列出所有客户端配置
-  --show            显示当前配置详情
-  --edit            打开配置文件编辑器
-  --export PATH     导出配置到文件
-  --import PATH     从文件导入配置
-  --validate        验证配置格式
+  --client TEXT      指定客户端（claude|cursor|cline|copilot|vscode|windsurf）
+  --tool TEXT        指定工具名称（用于 auto 操作）
+  --config PATH      指定配置文件路径
+  --name TEXT        服务器名称（用于 add/remove）
+  --command TEXT     命令路径（用于 add）
+  --args TEXT        命令参数，逗号分隔（用于 add）
+  --env KEY=VALUE    环境变量（可多次使用，格式 KEY=VALUE）
+  --import PATH      从文件导入配置（import 操作）
+  --export PATH      导出配置到文件路径（export 操作）
 ```
 
 **示例：**
 
 ```bash
 # 列出所有客户端配置
-mcp-hub config --list
+mcp-hub config list
 
-# 查看 Claude 配置详情
-mcp-hub config --client claude --show
+# 添加服务器配置
+mcp-hub config add --client claude --name filesystem --command /usr/bin/npx --args "-y,@modelcontextprotocol/server-filesystem"
 
-# 导出配置备份
-mcp-hub config --export ./mcp-backup.json
+# 添加带环境变量的配置
+mcp-hub config add --client claude --name postgres --command npx --env DATABASE_URL=postgres://localhost/db
 
-# 导入配置
-mcp-hub config --import ./mcp-backup.json
+# 移除服务器配置
+mcp-hub config remove --client claude --name filesystem
+
+# 生成 MCP JSON 配置
+mcp-hub config generate --client claude
+
+# 显示当前配置
+mcp-hub config show
 
 # 验证配置格式
-mcp-hub config --validate
+mcp-hub config validate --client claude
+
+# 导出配置备份
+mcp-hub config export --client claude --export ./claude-mcp-backup.json
+
+# 导入配置
+mcp-hub config import --client claude --import ./claude-mcp-backup.json
+
+# 自动配置工具到客户端
+mcp-hub config auto --client claude --tool server-filesystem
+
+# 检测客户端配置
+mcp-hub config detect
 ```
 
 ---
@@ -358,122 +370,39 @@ mcp-hub config --validate
 对 MCP 工具进行安全扫描。
 
 ```bash
-mcp-hub scan <tool> [OPTIONS]
+mcp-hub scan [tool] [OPTIONS]
 
 Arguments:
-  tool          工具名称或标识符（留空扫描所有已安装）
+  tool          工具名称（留空扫描所有已安装工具）
 
 Options:
-  --detailed        显示详细扫描报告
-  --json            以 JSON 格式输出
-  --severity TEXT   最低严重级别：info|low|medium|high|critical
+  --registry PATH    指定注册表路径
+  --quick, -q        快速扫描模式（仅输出分数）
+  --detailed, -d     显示详细扫描报告
+  --json, -j         以 JSON 格式输出
+  --severity TEXT    最低严重级别：UNKNOWN、LOW、MEDIUM、HIGH、VERIFIED
 ```
 
 **示例：**
 
 ```bash
 # 扫描单个工具
-mcp-hub scan @modelcontextprotocol/server-filesystem
+mcp-hub scan server-filesystem
 
 # 详细扫描报告
-mcp-hub scan @modelcontextprotocol/server-filesystem --detailed
+mcp-hub scan server-filesystem --detailed
 
 # 扫描所有已安装工具
 mcp-hub scan
 
+# 快速扫描
+mcp-hub scan server-filesystem --quick
+
+# JSON 输出
+mcp-hub scan server-filesystem --json
+
 # 仅显示高危问题
-mcp-hub scan --severity high
-```
-
----
-
-### `mcp-hub test <tool>`
-
-在本地测试环境中验证 MCP 工具功能。
-
-```bash
-mcp-hub test <tool> [OPTIONS]
-
-Arguments:
-  tool          工具名称或标识符
-
-Options:
-  --interactive     进入交互式测试模式
-  --timeout INT     测试超时时间（秒，默认 30）
-  --env TEXT        指定环境变量（key=value，可多次使用）
-```
-
-**示例：**
-
-```bash
-# 基本功能测试
-mcp-hub test @modelcontextprotocol/server-filesystem
-
-# 交互式测试
-mcp-hub test @modelcontextprotocol/server-filesystem --interactive
-
-# 带环境变量测试
-mcp-hub test mcp-server-db --env DATABASE_URL=sqlite:///test.db
-```
-
----
-
-### `mcp-hub info <tool>`
-
-查看 MCP 工具的详细信息。
-
-```bash
-mcp-hub info <tool> [OPTIONS]
-
-Arguments:
-  tool          工具名称或标识符
-
-Options:
-  --readme          显示完整 README
-  --versions        显示可用版本列表
-  --dependencies    显示依赖关系
-```
-
-**示例：**
-
-```bash
-# 查看工具基本信息
-mcp-hub info @modelcontextprotocol/server-filesystem
-
-# 查看所有版本
-mcp-hub info @modelcontextprotocol/server-filesystem --versions
-```
-
----
-
-### `mcp-hub update [tool]`
-
-更新已安装的 MCP 工具。
-
-```bash
-mcp-hub update [tool] [OPTIONS]
-
-Arguments:
-  tool          工具名称（留空更新所有）
-
-Options:
-  --all             更新所有已安装工具
-  --force           强制更新（即使版本相同）
-  --dry-run         预览更新，不执行
-  --client TEXT     同时更新客户端配置
-```
-
-**示例：**
-
-```bash
-# 更新指定工具
-mcp-hub update @modelcontextprotocol/server-filesystem
-
-# 更新所有工具
-mcp-hub update --all
-
-# 预览更新
-mcp-hub update --all --dry-run
+mcp-hub scan --severity HIGH
 ```
 
 ---
@@ -487,11 +416,11 @@ MCP Hub 会自动检测并管理以下客户端的 MCP 配置：
 | 客户端 | 配置文件路径 |
 |--------|-------------|
 | **Claude Desktop** | `~/.config/claude/claude_desktop_config.json` (macOS/Linux) <br> `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
-| **Cursor** | `~/.cursor/mcp.json` (macOS/Linux) <br> `%USERPROFILE%\.cursor\mcp.json` (Windows) |
-| **Cline** | `~/.config/cline/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
+| **Cursor** | `~/.cursor/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cursor\mcp.json` (Windows) |
+| **Cline** | `~/.cline/mcp.json` (macOS/Linux) <br> `%APPDATA%\Cline\mcp.json` (Windows) |
 | **GitHub Copilot** | VSCode 设置中的 `github.copilot.mcp` 配置 |
-| **VSCode** | `.vscode/mcp.json` 或用户设置 |
-| **Windsurf** | `~/.config/windsurf/mcp.json` (macOS/Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
+| **VSCode** | `~/.vscode/mcp.json` (macOS/Linux) <br> `%APPDATA%\Code\User\mcp.json` (Windows) |
+| **Windsurf** | `~/.windsurf/mcp.json` (macOS/Linux) <br> `%APPDATA%\Windsurf\mcp.json` (Windows) |
 
 ### 手动配置
 
@@ -515,32 +444,16 @@ MCP Hub 会自动检测并管理以下客户端的 MCP 配置：
 }
 ```
 
-### 导出/导入配置
-
-```bash
-# 导出当前所有配置到文件
-mcp-hub config --export ./mcp-config-backup.json
-
-# 从文件导入配置（合并模式）
-mcp-hub config --import ./mcp-config-backup.json
-
-# 导出特定客户端配置
-mcp-hub config --client claude --export ./claude-mcp.json
-```
-
 ### 环境变量配置
 
 MCP Hub 支持以下环境变量：
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `MCP_HUB_CONFIG_DIR` | 配置目录路径 | `~/.config/mcp-hub/` |
-| `MCP_HUB_REGISTRY_URL` | 自定义注册表 URL | 内置注册表 |
-| `MCP_HUB_CACHE_DIR` | 缓存目录路径 | `~/.cache/mcp-hub/` |
-| `MCP_HUB_LOG_LEVEL` | 日志级别 | `INFO` |
-| `MCP_HUB_DEFAULT_CLIENT` | 默认客户端 | 无 |
-| `MCP_HUB_NO_COLOR` | 禁用彩色输出 | `false` |
-| `MCP_HUB_VERIFY_SSL` | 验证 SSL 证书 | `true` |
+| `MCP_HUB_CONFIG_DIR` | 配置目录路径 | `~/.config/mcp-hub/`（若 `~/.mcp-hub/` 存在则回退） |
+| `MCP_HUB_TEST_MODE` | 测试模式（值为 `1` 时启用） | 无 |
+
+> **注意**：`MCP_HUB_REGISTRY_URL`、`MCP_HUB_CACHE_DIR`、`MCP_HUB_LOG_LEVEL`、`MCP_HUB_DEFAULT_CLIENT`、`MCP_HUB_NO_COLOR` 和 `MCP_HUB_VERIFY_SSL` 环境变量将在后续版本支持。
 
 ---
 
@@ -569,11 +482,6 @@ MCP Hub 为每个工具提供 0-100 分的安全评分，基于以下维度：
 
 每个 MCP 工具的权限在注册表中被明确标注：
 
-```bash
-# 查看工具权限详情
-mcp-hub info @modelcontextprotocol/server-filesystem --permissions
-```
-
 权限类型包括：
 
 - `filesystem:read` — 文件读取
@@ -588,11 +496,9 @@ mcp-hub info @modelcontextprotocol/server-filesystem --permissions
 1. **安装前扫描**：始终使用 `mcp-hub scan` 检查安全评分
 2. **最小权限原则**：只安装所需工具，避免使用权限过广的工具
 3. **隔离环境**：使用 Docker 或虚拟环境运行高风险工具
-4. **定期审查**：使用 `mcp-hub list --outdated` 检查工具更新
+4. **定期审查**：使用 `mcp-hub list --installed` 检查已安装工具
 5. **监控日志**：关注工具的运行日志，发现异常行为
 6. **限制目录**：文件系统工具应限制到特定工作目录
-
-更多安全信息，请参阅 [SECURITY.md](docs/SECURITY.md)。
 
 ---
 
@@ -631,9 +537,6 @@ pytest --cov=mcp_hub --cov-report=html
 
 # 运行特定测试文件
 pytest tests/test_installer.py
-
-# 运行性能测试
-pytest tests/ --benchmark-only
 ```
 
 ### 代码风格
@@ -673,33 +576,25 @@ make fix
 mcp-hub/
 ├── src/mcp_hub/
 │   ├── __init__.py        # 包入口
-│   ├── cli.py             # 命令行接口（Click/Typer）
-│   ├── registry.py        # 工具注册表（本地 + 远程）
+│   ├── cli.py             # 命令行接口（Typer）
+│   ├── registry.py        # 工具注册表（本地 + 内置）
 │   ├── installer.py       # 安装管理器（npm/pip/docker/git/binary）
 │   ├── config.py          # 配置管理（多客户端适配）
 │   ├── security.py        # 安全扫描引擎
-│   ├── tester.py          # 本地测试环境
-│   ├── models.py          # 数据模型（Pydantic）
 │   ├── utils.py           # 工具函数和辅助方法
 │   └── constants.py       # 常量和默认值
 ├── tests/
-│   ├── unit/              # 单元测试
-│   ├── integration/       # 集成测试
-│   ├── fixtures/          # 测试数据和 mock
+│   ├── test_cli.py        # CLI 测试
+│   ├── test_config.py     # 配置测试
+│   ├── test_installer.py  # 安装器测试
+│   ├── test_registry.py   # 注册表测试
+│   ├── test_security.py   # 安全测试
+│   ├── test_utils.py      # 工具测试
 │   └── conftest.py        # pytest 配置和共享 fixture
-├── registry/
-│   ├── tools.json         # 内置工具注册表
-│   └── categories.json    # 分类定义
-├── docs/
-│   ├── ARCHITECTURE.md    # 架构设计文档
-│   ├── CONTRIBUTING.md    # 贡献指南
-│   └── SECURITY.md        # 安全文档
-├── scripts/
-│   ├── build.py           # 构建脚本
-│   └── release.py         # 发布脚本
 ├── pyproject.toml         # 项目配置和依赖
-├── Makefile               # 常用命令快捷方式
-└── README.md              # 本文件
+├── README.md              # 中文文档
+├── README_EN.md          # 英文文档
+└── plan.md               # UAT 修复计划
 ```
 
 ### 核心模块职责
@@ -707,11 +602,11 @@ mcp-hub/
 | 模块 | 职责 |
 |------|------|
 | `cli.py` | 解析命令行参数，调用各功能模块，格式化输出 |
-| `registry.py` | 维护工具元数据索引，支持搜索、查询、缓存 |
+| `registry.py` | 维护工具元数据索引，支持搜索、查询、内置工具加载 |
 | `installer.py` | 封装多种安装方式的统一接口，处理依赖和环境 |
 | `config.py` | 适配不同客户端的配置格式，读写配置文件 |
 | `security.py` | 静态代码分析、权限提取、漏洞扫描、评分计算 |
-| `tester.py` | 启动 MCP 工具进程，验证工具协议兼容性 |
+| `utils.py` | 共享工具函数、日志、进度条、平台检测 |
 
 ---
 
@@ -758,12 +653,22 @@ mcp-hub/
 ## 路线图
 
 ### v0.1.0 — 基础功能 ✅
-- [x] 核心命令行接口
-- [x] 工具注册表和搜索
-- [x] 多安装方式支持（npm/pip/docker/git/binary）
-- [x] 多客户端配置管理（Claude/Cursor/Cline）
-- [x] 基础安全扫描
-- [x] 本地测试环境
+- [x] 核心命令行接口（含 `--version` 全局选项）
+- [x] 工具注册表和搜索（支持 `--tag`、`--category`、`--limit`、`--sort`、`--json`）
+- [x] 多安装方式支持（npm/pip/docker/git/binary/auto）
+- [x] 多客户端配置管理（Claude/Cursor/Cline/Copilot/VSCode/Windsurf）
+- [x] 安装后自动配置到客户端（`--client`）
+- [x] 基础安全扫描（支持 `--quick`、`--detailed`、`--json`、`--severity`）
+- [x] 无参数扫描所有已安装工具
+- [x] 强制重新安装（`--force`）
+- [x] 模拟安装（`--dry-run`）
+- [x] 配置导出/导入（`--export`、`--import`）
+- [x] 配置验证（`--validate`）
+- [x] 环境变量支持（`MCP_HUB_CONFIG_DIR`）
+- [x] 路径一致性修复（`~/.config/mcp-hub/`）
+- [x] npm scope 包名支持（`@org/package`）
+- [x] 工具名验证和路径遍历防护
+- [x] Rich 表格和彩色输出
 
 ### v0.2.0 — 安全扫描增强 🚧
 - [ ] 动态行为分析沙箱

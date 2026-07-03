@@ -479,15 +479,24 @@ class SecurityScanner:
         
         return report
     
-    def quick_scan(self, tool_name: str) -> int:
-        """Quick security score (0-100) without detailed analysis.
-        
+    def quick_scan(self, tool_name: str) -> SecurityReport:
+        """Quick security scan without detailed analysis.
+
         This is a lightweight scan that skips code snippet collection
         and detailed dependency analysis. Suitable for batch operations.
-        
+
         Args:
             tool_name: Name of the MCP tool to scan
-            
+
+        Returns:
+            SecurityReport with analysis results
+        """
+        report = self.scan(tool_name, detailed=False)
+        return report
+
+    def quick_scan_score(self, tool_name: str) -> int:
+        """Quick security score (0-100) without detailed analysis.
+
         Returns:
             Integer score from 0 (high risk) to 100 (low risk)
         """
