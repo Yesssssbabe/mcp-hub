@@ -48,9 +48,13 @@ _env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
 if _env_dir:
     _default_data_dir = Path(_env_dir).expanduser().resolve()
 else:
-    _default_data_dir = Path.home() / ".config" / "mcp-hub"
-    if (Path.home() / ".mcp-hub").exists() and not _default_data_dir.exists():
-        _default_data_dir = Path.home() / ".mcp-hub"
+    try:
+        _home = Path.home()
+    except (RuntimeError, OSError):
+        _home = Path.cwd() if Path.cwd().exists() else Path("/tmp")
+    _default_data_dir = _home / ".config" / "mcp-hub"
+    if (_home / ".mcp-hub").exists() and not _default_data_dir.exists():
+        _default_data_dir = _home / ".mcp-hub"
 
 DEFAULT_DATA_DIR: Final[Path] = _default_data_dir
 DEFAULT_REGISTRY_PATH: Final[Path] = DEFAULT_DATA_DIR / "registry.json"
@@ -106,6 +110,7 @@ _SECURITY_LEVELS_PRIVATE: Dict[int, str] = {
     2: "medium",
     3: "high",
     4: "verified",
+    5: "critical",
 }
 
 SECURITY_LEVELS: Final[MappingProxyType[int, str]] = MappingProxyType(
@@ -128,7 +133,9 @@ def is_valid_security_level(level: Union[int, str]) -> bool:
     """Check if a security level is valid (by numeric value or name)."""
     if isinstance(level, int):
         return level in SECURITY_LEVELS
-    return level in _REVERSE_SECURITY
+    if isinstance(level, str):
+        return level.lower() in _REVERSE_SECURITY
+    return False
 
 
 def get_security_level_name(level: int) -> Optional[str]:

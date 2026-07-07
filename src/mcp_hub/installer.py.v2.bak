@@ -68,7 +68,6 @@ class Installer:
     # ------------------------------------------------------------------
     MAX_DOWNLOAD_SIZE: int = 500 * 1024 * 1024  # 500 MB
     DOWNLOAD_TIMEOUT: int = 60  # seconds
-    NETWORK_TIMEOUT: int = 60  # seconds for npm/pip/docker/git commands
     MAX_REDIRECTS: int = 5
     CHUNK_SIZE: int = 8192  # 8 KB
 
@@ -207,11 +206,11 @@ class Installer:
     def _validate_tool_name(self, tool_name: str) -> None:
         """Validate tool_name to prevent path traversal attacks.
 
-        Only allows Unicode word characters, hyphens, and underscores.
+        Only allows alphanumeric characters, hyphens, and underscores.
         """
-        if not tool_name or not re.match(r'^[\w\-]+$', tool_name):
+        if not tool_name or not re.match(r'^[a-zA-Z0-9_-]+$', tool_name):
             raise ValueError(
-                f"Invalid tool_name '{tool_name}': only letters, numbers, "
+                f"Invalid tool_name '{tool_name}': only alphanumeric, "
                 "hyphen and underscore characters are allowed"
             )
 
@@ -242,7 +241,7 @@ class Installer:
 
     def _is_valid_tool_name(self, tool_name: str) -> bool:
         """Validate tool name against whitelist to prevent path traversal."""
-        return bool(re.match(r"^[\w\-]+$", tool_name))
+        return bool(re.match(r"^[a-zA-Z0-9_-]+$", tool_name))
 
     def _is_valid_package_name(self, package: str) -> bool:
         """Validate package name to prevent option injection.
@@ -427,7 +426,7 @@ class Installer:
                 errors=[msg],
             )
 
-        log_warnings: List[str] = []
+        errors: List[str] = []
 
         # Remove installation directory (with path boundary validation)
         try:
@@ -438,23 +437,11 @@ class Installer:
         except ValueError as exc:
             msg = str(exc)
             logger.error(msg)
-            return InstallResult(
-                success=False,
-                tool_name=tool_name,
-                message=msg,
-                install_path=install_path,
-                errors=[msg],
-            )
+            errors.append(msg)
         except OSError as exc:
             msg = f"Failed to remove directory {install_path}: {exc}"
             logger.error(msg)
-            return InstallResult(
-                success=False,
-                tool_name=tool_name,
-                message=msg,
-                install_path=install_path,
-                errors=[msg],
-            )
+            errors.append(msg)
 
         # Optional: purge logs
         if purge:
@@ -465,8 +452,8 @@ class Installer:
                     logger.info("Removed install log: %s", log_path)
             except OSError as exc:
                 msg = f"Failed to remove log {log_path}: {exc}"
-                logger.warning(msg)
-                log_warnings.append(msg)
+                logger.error(msg)
+                errors.append(msg)
 
         # Update registry
         try:
@@ -474,21 +461,15 @@ class Installer:
         except OSError as exc:
             msg = f"Failed to update registry for '{tool_name}': {exc}"
             logger.error(msg)
-            return InstallResult(
-                success=False,
-                tool_name=tool_name,
-                message=f"Uninstalled but registry update failed: {msg}",
-                install_path=install_path,
-                errors=[msg],
-            )
+            errors.append(msg)
 
-        if log_warnings:
+        if errors:
             return InstallResult(
                 success=False,
                 tool_name=tool_name,
-                message=f"Uninstalled '{tool_name}' with warnings",
+                message=f"Uninstall of '{tool_name}' completed with errors",
                 install_path=install_path,
-                errors=log_warnings,
+                errors=errors,
             )
 
         msg = f"Successfully uninstalled '{tool_name}'"
@@ -681,7 +662,7 @@ class Installer:
             cmd,
             cwd=target_dir,
             env=env,
-            timeout=self.NETWORK_TIMEOUT,
+            timeout=300,
         )
 
         self._write_log(tool_name, stdout, stderr)
@@ -743,7 +724,7 @@ class Installer:
         returncode, stdout, stderr = self._run_command(
             cmd,
             env=env,
-            timeout=self.NETWORK_TIMEOUT,
+            timeout=300,
         )
 
         self._write_log(tool_name, stdout, stderr)
@@ -782,7 +763,7 @@ class Installer:
         cmd = ["docker", "pull", image]
         returncode, stdout, stderr = self._run_command(
             cmd,
-            timeout=self.NETWORK_TIMEOUT,
+            timeout=600,
         )
         self._write_log(tool_name, stdout, stderr)
 
@@ -846,7 +827,7 @@ class Installer:
         cmd = ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1", "--", repo_url, target_dir]
         returncode, stdout, stderr = self._run_command(
             cmd,
-            timeout=self.NETWORK_TIMEOUT,
+            timeout=300,
         )
         self._write_log(tool_name, stdout, stderr)
 
@@ -911,7 +892,7 @@ class Installer:
             returncode, stdout, stderr = self._run_command(
                 install_cmd,
                 cwd=target_dir,
-                timeout=self.NETWORK_TIMEOUT,
+                timeout=300,
             )
             self._write_log(tool_name, stdout, stderr)
             if returncode != 0:
@@ -1199,7 +1180,7 @@ class Installer:
             stdout = exc.stdout if exc.stdout else ""
             stderr = exc.stderr if exc.stderr else ""
             logger.error("Command timed out after %ss: %s", timeout, cmd)
-            return -1, stdout, f"Network timeout after {timeout}s — please check your internet connection and try again.\n{stderr}"
+            return -1, stdout, f"Command timed out after {timeout}s\n{stderr}"
         except FileNotFoundError:
             logger.error("Command not found: %s", cmd[0])
             return -1, "", f"Command not found: {cmd[0]}"
@@ -1241,7 +1222,7 @@ class Installer:
 
         Sanitizes tool_name to prevent path traversal via log file names.
         """
-        safe_name = re.sub(r'[^\w\-]', '_', tool_name)
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_name)
         return os.path.join(self.log_dir, f"{safe_name}.install.log")
 
     def _cleanup_on_failure(

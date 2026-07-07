@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from pydantic import BaseModel, Field, field_validator
 
 from mcp_hub.constants import (
@@ -182,7 +182,7 @@ ALLOWED_COMMANDS = {
 }
 
 # Dangerous shell metacharacters that should not appear in args
-SHELL_METACHARS = re.compile(r'[;|&$(){}[\]<>]`')
+SHELL_METACHARS = re.compile(r'[;|&$(){}[\]<>`]')
 
 # Maximum allowed nesting depth for global_settings
 MAX_GLOBAL_SETTINGS_DEPTH = 3
@@ -223,6 +223,8 @@ def _validate_env(env: Dict[str, Any]) -> None:
     if not isinstance(env, dict):
         raise ConfigError("Env must be a dictionary")
     for key, value in env.items():
+        if not key.strip():
+            raise ConfigError("Environment variable key must not be empty")
         if not isinstance(key, str):
             raise ConfigError(f"Env key must be a string, got {type(key).__name__}")
         if not isinstance(value, str):
@@ -299,7 +301,7 @@ def _validate_import_path(file_path: str) -> Path:
             continue
     if not allowed:
         raise ConfigError(
-            f"Import path {path} must be within allowed directories: {ALLOWED_IMPORT_DIRS}"
+            "Import path must be within the allowed data directory."
         )
     return path
 
@@ -315,7 +317,7 @@ def _validate_export_path(output_path: str) -> Path:
         path.relative_to(allowed_dir)
     except ValueError:
         raise ConfigError(
-            f"Export path {path} must be within the allowed export directory: {allowed_dir}"
+            "Export path must be within the allowed export directory."
         )
     return path
 
@@ -516,7 +518,7 @@ class ConfigManager:
                     for allowed_base in allowed_bases
                 ):
                     raise ConfigError(
-                        f"Config path must be inside one of {allowed_bases}: {config_path}"
+                        "Config path must be inside the allowed data directory."
                     )
             self.config_path = expanded
             config_dir = os.path.dirname(self.config_path)
@@ -538,6 +540,34 @@ class ConfigManager:
         self._lock = threading.RLock()
         self._hub_lock = FileLock(self.config_path + ".lock")
         self._load()
+
+    # -- Init-level cross-process locking ------------------------------------
+
+    def acquire_init_lock(self):
+        """Acquire a non-blocking exclusive init lock.
+
+        Raises ConfigError if another init process is already holding the lock.
+        Returns the FileLock instance so the caller can release it.
+        """
+        lock_path = self.config_path + ".init.lock"
+        lock = FileLock(lock_path, timeout=0)
+        try:
+            lock.acquire()
+        except Timeout:
+            raise ConfigError(
+                "Another init process is already running. "
+                "Please wait for it to complete before retrying."
+            )
+        try:
+            os.chmod(lock_path, 0o600)
+        except OSError:
+            pass
+        return lock
+
+    @staticmethod
+    def release_init_lock(lock) -> None:
+        """Release the init lock acquired by acquire_init_lock."""
+        lock.release()
 
     # -- Internal persistence ------------------------------------------------
 
@@ -827,9 +857,19 @@ class ConfigManager:
             if "mcpServers" not in data:
                 raise ConfigError("Invalid MCP config: missing 'mcpServers' key")
 
-            self.configs[client_name] = ClientConfig.from_mcp_json(
-                client_name, data
-            )
+            # Security validation: validate each server before state mutation
+            temp_client = ClientConfig.from_mcp_json(client_name, data)
+            for server_name, server in temp_client.servers.items():
+                try:
+                    _validate_command(server.command)
+                    _validate_args(server.args)
+                    _validate_env(server.env)
+                except ConfigError as exc:
+                    raise ConfigError(
+                        f"Security validation failed for server '{server_name}': {exc}"
+                    ) from exc
+
+            self.configs[client_name] = temp_client
             self._save()
             return True
 
@@ -927,6 +967,19 @@ class ConfigManager:
                 issues.append(f"Server at index has empty name")
             if not server.command:
                 issues.append(f"Server '{name}' has empty command")
+            # Security validation for command, args, and env
+            try:
+                _validate_command(server.command)
+            except ConfigError as exc:
+                issues.append(f"Server '{name}' command security validation failed: {exc}")
+            try:
+                _validate_args(server.args)
+            except ConfigError as exc:
+                issues.append(f"Server '{name}' args security validation failed: {exc}")
+            try:
+                _validate_env(server.env)
+            except ConfigError as exc:
+                issues.append(f"Server '{name}' env security validation failed: {exc}")
             # Check for potential security issues in env keys and values.
             for env_key, env_value in server.env.items():
                 lower_key = env_key.lower()

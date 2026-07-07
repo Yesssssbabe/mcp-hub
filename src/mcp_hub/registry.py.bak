@@ -1,16 +1,13 @@
 """MCP Tool Registry module for managing MCP tool metadata and discovery."""
 
-import copy
-import json
-import logging
 import os
+import json
 import re
-import shutil
 import tempfile
 import threading
 from datetime import datetime
+from typing import Any, List, Optional, Dict, Union
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
 
 try:
     import fcntl
@@ -18,26 +15,12 @@ try:
 except ImportError:
     _HAS_FCNTL = False
 
-try:
-    from filelock import FileLock
-    _HAS_FILELOCK = True
-except ImportError:
-    _HAS_FILELOCK = False
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from mcp_hub.constants import DEFAULT_DATA_DIR
 
-from mcp_hub.constants import DEFAULT_DATA_DIR, RegistryError
-
-_logger = logging.getLogger(__name__)
-
-
-def _get_default_registry_path() -> str:
-    return str(DEFAULT_DATA_DIR / "registry.json")
-
-
-def _get_allowed_registry_dir() -> Path:
-    return DEFAULT_DATA_DIR
-
+DEFAULT_REGISTRY_PATH = str(DEFAULT_DATA_DIR / "registry.json")
+ALLOWED_REGISTRY_DIR = DEFAULT_DATA_DIR
 MAX_REGISTRY_SIZE = 10 * 1024 * 1024  # 10MB
 
 
@@ -46,7 +29,7 @@ class MCPConfigTemplate(BaseModel):
 
     command: str = Field(
         ...,
-        pattern=r"^[\w\-]+$",
+        pattern=r"^[a-zA-Z0-9_-]+$",
         max_length=64,
         description="MCP server command (e.g., npx, python)"
     )
@@ -82,7 +65,7 @@ class MCPTool(BaseModel):
         ...,
         min_length=1,
         max_length=64,
-        pattern=r"^[\w\-]+$",
+        pattern=r"^[a-zA-Z0-9_-]+$",
         description="Unique tool name (alphanumeric, hyphens, underscores)"
     )
     display_name: str = Field(..., description="Human-readable name")
@@ -112,10 +95,10 @@ class MCPTool(BaseModel):
     install_args: Optional[Dict] = Field(None, description="Additional install args")
 
     # Optional per-method identifiers used by the installer
-    npm_package: Optional[str] = Field(None, pattern=r"^[\w.@-]+$")
-    pip_package: Optional[str] = Field(None, pattern=r"^[\w.@-]+$")
+    npm_package: Optional[str] = Field(None, pattern=r"^[a-zA-Z0-9_.@-]+$")
+    pip_package: Optional[str] = Field(None, pattern=r"^[a-zA-Z0-9_.@-]+$")
     pip_editable: bool = Field(False)
-    docker_image: Optional[str] = Field(None, pattern=r"^[\w.:/@-]+$")
+    docker_image: Optional[str] = Field(None, pattern=r"^[a-zA-Z0-9_.:/@-]+$")
     git_repo: Optional[str] = Field(None, pattern=r"^https?://")
     binary_url: Optional[str] = Field(None, pattern=r"^https?://")
     binary_size: Optional[int] = Field(None, ge=0)
@@ -184,18 +167,10 @@ class MCPTool(BaseModel):
             for arg in v:
                 if not isinstance(arg, str) or len(arg) > 256:
                     raise ValueError("install_command list args must be strings <= 256 characters")
-                if not re.match(r"^[\w.\/:@-]+$", arg):
+                if not re.match(r"^[a-zA-Z0-9_.\/:@-]+$", arg):
                     raise ValueError(f"install_command arg contains illegal characters: {arg!r}")
             return v
         raise ValueError("install_command must be a string or list of strings")
-
-    def model_dump_public(self) -> Dict[str, Any]:
-        """Serialize tool with sensitive env vars masked."""
-        data = self.model_dump()
-        env_vars = data.get("env_vars")
-        if isinstance(env_vars, list):
-            data["env_vars"] = ["***" if v else v for v in env_vars]
-        return data
 
     model_config = ConfigDict(
         validate_assignment=True,
@@ -207,9 +182,6 @@ class MCPTool(BaseModel):
 class Registry:
     """Manages the MCP tool registry."""
 
-    _file_cache: Dict[str, Any] = {}
-    _CACHE_LOCK = threading.Lock()
-
     def __init__(self, registry_path: Optional[str] = None):
         if registry_path:
             raw_path = registry_path
@@ -218,12 +190,11 @@ class Registry:
             if env_dir:
                 raw_path = os.path.join(env_dir, "registry.json")
             else:
-                raw_path = os.path.expanduser(_get_default_registry_path())
+                raw_path = os.path.expanduser(DEFAULT_REGISTRY_PATH)
         self.registry_path = self._sanitize_path(raw_path)
         self.tools: Dict[str, MCPTool] = {}
         self._lock = threading.RLock()
-        self._batch_mode = False
-        self._load_with_cache()
+        self._load()
 
     def _sanitize_path(self, raw_path: str) -> str:
         """Validate that registry path is within the allowed directory."""
@@ -231,7 +202,7 @@ class Registry:
         # Test mode: allow temporary paths so the test suite can use tmp_path.
         if os.environ.get("MCP_HUB_TEST_MODE") == "1":
             return str(resolved)
-        allowed_bases = [_get_allowed_registry_dir().resolve()]
+        allowed_bases = [ALLOWED_REGISTRY_DIR.resolve()]
         env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
         if env_dir:
             env_path = Path(env_dir).expanduser().resolve()
@@ -244,115 +215,24 @@ class Registry:
             except ValueError:
                 continue
         raise ValueError(
-            "Registry path must be within the allowed directory."
+            f"Registry path must be within {allowed_bases[0]}, got: {resolved}"
         )
-
-    def acquire_init_lock(self) -> Optional[Any]:
-        """Acquire a non-blocking exclusive init lock.
-
-        Uses fcntl on Unix, falls back to filelock on other platforms.
-        Returns the lock handle or None if locking is unavailable.
-        """
-        lock_file = Path(self.registry_path).parent / ".init.lock"
-        try:
-            lock_file.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        if _HAS_FCNTL:
-            try:
-                fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except (OSError, IOError):
-                try:
-                    os.close(fd)
-                except Exception:
-                    pass
-                return None
-        elif _HAS_FILELOCK:
-            try:
-                flock = FileLock(str(lock_file), timeout=0)
-                flock.acquire()
-                return flock
-            except Exception:
-                return None
-        return None
-
-    def release_init_lock(self, lock_handle: Optional[Any]) -> None:
-        """Release the init lock acquired by acquire_init_lock()."""
-        if lock_handle is None:
-            return
-        if isinstance(lock_handle, int):
-            try:
-                fcntl.flock(lock_handle, fcntl.LOCK_UN)
-                os.close(lock_handle)
-            except (OSError, IOError):
-                pass
-        else:
-            try:
-                lock_handle.release()
-            except Exception:
-                pass
-
-    def _load_with_cache(self) -> None:
-        """Load registry with file-based caching."""
-        if not os.path.exists(self.registry_path):
-            return
-        try:
-            stat = os.stat(self.registry_path)
-            cache_key = f"{self.registry_path}:{stat.st_mtime}:{stat.st_size}:{stat.st_ino}"
-        except OSError:
-            self._load()
-            return
-
-        with Registry._CACHE_LOCK:
-            cached = Registry._file_cache.get(cache_key)
-            if cached is not None:
-                with self._lock:
-                    self.tools = copy.deepcopy(cached)
-                return
-
-        self._load()
-
-        with Registry._CACHE_LOCK:
-            Registry._file_cache[cache_key] = copy.deepcopy(self.tools)
-
-    def _invalidate_cache(self) -> None:
-        """Invalidate all cache entries for this registry path."""
-        with Registry._CACHE_LOCK:
-            keys_to_remove = [k for k in Registry._file_cache if k.startswith(f"{self.registry_path}:")]
-            for k in keys_to_remove:
-                del Registry._file_cache[k]
-
-    def _read_locked(self, path: str) -> dict:
-        """Read JSON under a shared advisory lock."""
-        with open(path, "r", encoding="utf-8") as f:
-            if _HAS_FCNTL:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            try:
-                return json.load(f)
-            finally:
-                if _HAS_FCNTL:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-    def _load_tools(self, data: dict) -> None:
-        """Load tools from parsed registry data."""
-        if not isinstance(data, dict):
-            raise ValueError("Registry JSON must be a top-level object")
-        tools_data = data.get("tools")
-        if not isinstance(tools_data, list):
-            raise ValueError("Registry 'tools' must be a list")
-
-        for tool_data in tools_data:
-            if not isinstance(tool_data, dict):
-                raise ValueError("Each tool entry must be a JSON object")
-            tool = MCPTool(**tool_data)
-            self.tools[tool.name] = tool
 
     def _load(self) -> None:
         """Load registry from disk with shared file lock and corruption fallback."""
         if not os.path.exists(self.registry_path):
             return
+
+        def _read_locked(path: str) -> dict:
+            """Read JSON under a shared advisory lock."""
+            with open(path, "r", encoding="utf-8") as f:
+                if _HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    return json.load(f)
+                finally:
+                    if _HAS_FCNTL:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         try:
             # File size guard against DoS
@@ -361,53 +241,32 @@ class Registry:
                 raise ValueError(
                     f"Registry file too large: {file_size} bytes (max {MAX_REGISTRY_SIZE})"
                 )
-            data = self._read_locked(self.registry_path)
+            data = _read_locked(self.registry_path)
             with self._lock:
-                self._load_tools(data)
-        except (json.JSONDecodeError, OSError, ValueError, RecursionError, TypeError, ValidationError):
+                if not isinstance(data, dict):
+                    raise ValueError("Registry JSON must be a top-level object")
+                tools_data = data.get("tools")
+                if not isinstance(tools_data, list):
+                    raise ValueError("Registry 'tools' must be a list")
+
+                for tool_data in tools_data:
+                    if not isinstance(tool_data, dict):
+                        raise ValueError("Each tool entry must be a JSON object")
+                    tool = MCPTool(**tool_data)
+                    self.tools[tool.name] = tool
+        except (json.JSONDecodeError, OSError, ValueError, RecursionError):
             # Corruption detected — attempt backup recovery
             backup_path = self.registry_path + ".bak"
             if os.path.exists(backup_path):
                 try:
-                    data = self._read_locked(backup_path)
+                    data = _read_locked(backup_path)
                     with self._lock:
-                        self._load_tools(data)
-                    _logger.info("Registry restored from backup after corruption detected.")
-                    # Preserve corrupted file for inspection
-                    corrupted_path = (
-                        self.registry_path + ".corrupted." + datetime.now().strftime("%Y%m%d%H%M%S")
-                    )
-                    os.rename(self.registry_path, corrupted_path)
-                    return
+                        for tool_data in data.get("tools", []):
+                            tool = MCPTool(**tool_data)
+                            self.tools[tool.name] = tool
                 except Exception:
-                    _logger.error("Registry backup is also unusable.")
-                    raise RegistryError(
-                        "Registry file is corrupted and backup is unusable. "
-                        "Run 'mcp-hub init --force' to recreate."
-                    )
-            else:
-                raise RegistryError(
-                    "Registry file is corrupted and no backup exists. "
-                    "Run 'mcp-hub init --force' to recreate."
-                )
-
-    def _rotate_backups(self) -> None:
-        """Rotate backup chain .bak → .bak.1 → .bak.2 → ... → .bak.5."""
-        base = self.registry_path + ".bak"
-        if not os.path.exists(base):
-            return
-        for i in range(4, 0, -1):
-            src = base + (f".{i}" if i > 1 else "")
-            dst = base + f".{i + 1}"
-            if os.path.exists(src):
-                try:
-                    os.replace(src, dst)
-                except OSError:
+                    # Backup also unusable — degrade to empty registry
                     pass
-        try:
-            os.replace(base, base + ".1")
-        except OSError:
-            pass
 
     def _save(self) -> None:
         """Save registry to disk atomically with backup and exclusive file locking."""
@@ -429,20 +288,17 @@ class Registry:
                     pass
                 raise
 
-            # 2) Rotate backups before overwriting current file
-            self._rotate_backups()
-
-            # 3) Acquire exclusive lock on a separate lock file (inode-safe)
+            # 2) Acquire exclusive lock on a separate lock file (inode-safe)
             if _HAS_FCNTL:
                 lock_path = self.registry_path + ".lock"
                 with open(lock_path, "w", encoding="utf-8") as lock_f:
                     fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
                     try:
-                        # 4) Backup current file before replacing
+                        # 3) Backup current file before replacing
                         if os.path.exists(self.registry_path):
                             backup_path = self.registry_path + ".bak"
                             os.replace(self.registry_path, backup_path)
-                        # 5) Atomic rename: temp → target
+                        # 4) Atomic rename: temp → target
                         os.replace(temp_path, self.registry_path)
                     finally:
                         fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
@@ -452,8 +308,6 @@ class Registry:
                     backup_path = self.registry_path + ".bak"
                     os.replace(self.registry_path, backup_path)
                 os.replace(temp_path, self.registry_path)
-            # Invalidate cache after successful save
-            self._invalidate_cache()
 
     def search(
         self,
@@ -492,10 +346,12 @@ class Registry:
         # --- Input validation end ---
 
         with self._lock:
+            if not self.tools:
+                return []
             results = list(self.tools.values())
         query_lower = query.lower()
 
-        # Filter by query string (matches name, display_name, description, tags, long_description)
+        # Filter by query string (matches name, display_name, description, tags)
         if query_lower:
             results = [
                 tool
@@ -503,7 +359,6 @@ class Registry:
                 if query_lower in tool.name.lower()
                 or query_lower in tool.display_name.lower()
                 or query_lower in tool.description.lower()
-                or query_lower in tool.long_description.lower()
                 or any(query_lower in tag.lower() for tag in tool.tags)
                 or any(query_lower in cat.lower() for cat in tool.categories)
             ]
@@ -517,13 +372,13 @@ class Registry:
                 if all(t in [tag.lower() for tag in tool.tags] for t in tags_lower)
             ]
 
-        # Filter by category (case-insensitive, space-tolerant)
+        # Filter by category (case-insensitive)
         if category:
-            cat_normalized = category.lower().replace(" ", "")
+            cat_lower = category.lower()
             results = [
                 tool
                 for tool in results
-                if any(cat_normalized == cat.lower().replace(" ", "") for cat in tool.categories)
+                if any(cat_lower == cat.lower() for cat in tool.categories)
             ]
 
         # Sort results
@@ -568,8 +423,7 @@ class Registry:
                 tool.is_installed = True
                 tool.install_path = install_path
                 tool.updated_at = datetime.now().isoformat()
-                if not self._batch_mode:
-                    self._save()
+                self._save()
 
     def mark_uninstalled(self, name: str) -> None:
         """Mark a tool as not installed."""
@@ -579,8 +433,7 @@ class Registry:
                 tool.is_installed = False
                 tool.install_path = None
                 tool.updated_at = datetime.now().isoformat()
-                if not self._batch_mode:
-                    self._save()
+                self._save()
 
     def list_installed(self) -> List[str]:
         """List names of all installed tools."""
@@ -612,8 +465,7 @@ class Registry:
                 raise ValueError(f"Tool '{tool.name}' already exists in registry.")
             tool.updated_at = datetime.now().isoformat()
             self.tools[tool.name] = tool
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def remove(self, name: str) -> None:
         """Remove a tool from registry."""
@@ -621,8 +473,7 @@ class Registry:
             if name not in self.tools:
                 raise KeyError(f"Tool '{name}' not found in registry.")
             del self.tools[name]
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def list_categories(self) -> List[str]:
         """List all unique categories."""
@@ -663,8 +514,7 @@ class Registry:
             if downloads is not None:
                 tool.downloads = downloads
             tool.updated_at = datetime.now().isoformat()
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def update_security_score(self, name: str, score: int) -> None:
         """Update security score."""
@@ -676,8 +526,7 @@ class Registry:
                 raise KeyError(f"Tool '{name}' not found in registry.")
             tool.security_score = score
             tool.updated_at = datetime.now().isoformat()
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def update(self, tool: MCPTool) -> None:
         """Update an existing tool in the registry."""
@@ -686,8 +535,7 @@ class Registry:
                 raise KeyError(f"Tool '{tool.name}' not found in registry.")
             tool.updated_at = datetime.now().isoformat()
             self.tools[tool.name] = tool
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def __len__(self) -> int:
         with self._lock:
@@ -699,42 +547,16 @@ class Registry:
             for tool in _builtin_tools():
                 if tool.name not in self.tools:
                     self.tools[tool.name] = tool
-            if not self._batch_mode:
-                self._save()
+            self._save()
 
     def __contains__(self, name: str) -> bool:
         with self._lock:
             return name in self.tools
 
-    def batch_mode(self):
-        """Context manager to batch mutations and save once at exit."""
-        return _BatchMode(self)
-
-
-
-class _BatchMode:
-    """Context manager for batch registry operations."""
-
-    def __init__(self, registry: Registry):
-        self.registry = registry
-
-    def __enter__(self):
-        self.registry._batch_mode = True
-        return self.registry
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        try:
-            if exc_type is None:
-                self.registry._save()
-        finally:
-            self.registry._batch_mode = False
-        return False
-
 
 def _builtin_tools() -> List[MCPTool]:
     """Return the raw built-in MCP tool definitions."""
-    _BUILTIN_TIMESTAMP = datetime.now().isoformat()
-    tools = [
+    return [
         # ─── Browser / Web ──────────────────────────────
         MCPTool(
             name="server-puppeteer",
@@ -1436,10 +1258,6 @@ def _builtin_tools() -> List[MCPTool]:
             },
         ),
     ]
-    for tool in tools:
-        tool.created_at = _BUILTIN_TIMESTAMP
-        tool.updated_at = _BUILTIN_TIMESTAMP
-    return tools
 
 
 def load_builtin_registry() -> List[MCPTool]:

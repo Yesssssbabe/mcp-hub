@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from mcp_hub.registry import MCPTool, Registry
+from mcp_hub.constants import RegistryError
 
 
 def make_tool(**kwargs):
@@ -114,8 +115,8 @@ class TestRegistryInit:
         registry_path = tmp_path / "registry.json"
         with open(registry_path, "w", encoding="utf-8") as f:
             f.write("not valid json")
-        registry = Registry(registry_path=str(registry_path))
-        assert len(registry) == 0
+        with pytest.raises(RegistryError):
+            Registry(registry_path=str(registry_path))
 
     def test_registry_creates_directory(self, tmp_path):
         nested = tmp_path / "nested" / "deep" / "registry.json"
@@ -339,8 +340,9 @@ class TestRegistryEdgeCases:
             make_tool(name=long_name, display_name="Long")
 
     def test_unicode(self, tmp_registry):
-        with pytest.raises(ValueError):
-            make_tool(name="中文工具", display_name="中文")
+        tool = make_tool(name="中文工具", display_name="中文")
+        assert tool.name == "中文工具"
+        assert tool.display_name == "中文"
 
 
 class TestRegistryConcurrency:

@@ -24,7 +24,7 @@ try:
 except ImportError:
     _HAS_FILELOCK = False
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mcp_hub.constants import DEFAULT_DATA_DIR, RegistryError
 
@@ -364,7 +364,7 @@ class Registry:
             data = self._read_locked(self.registry_path)
             with self._lock:
                 self._load_tools(data)
-        except (json.JSONDecodeError, OSError, ValueError, RecursionError, TypeError, ValidationError):
+        except (json.JSONDecodeError, OSError, ValueError, RecursionError, TypeError):
             # Corruption detected — attempt backup recovery
             backup_path = self.registry_path + ".bak"
             if os.path.exists(backup_path):

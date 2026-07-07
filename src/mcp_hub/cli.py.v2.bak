@@ -5,15 +5,14 @@ import logging
 import os
 import re
 import shutil
-import sys
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict
 
 import typer
 from typing_extensions import Annotated
 
 from mcp_hub.config import ClientConfig, ConfigManager, MCPConfig, _validate_env
-from mcp_hub.constants import DEFAULT_DATA_DIR, INSTALL_TYPES, MCPHubError, SUPPORTED_CLIENTS
+from mcp_hub.constants import DEFAULT_DATA_DIR, MCPHubError, SUPPORTED_CLIENTS
 from mcp_hub.installer import Installer
 from mcp_hub.registry import MCPTool, Registry, load_builtin_registry
 from mcp_hub.security import SecurityScanner, SecurityLevel
@@ -35,22 +34,9 @@ app = typer.Typer(
 console = Logger("CLI")
 rich_console = Console()
 
-# ---- Runtime config base (FIX-01) ----
-def _get_config_base() -> Path:
-    """Return the effective configuration base directory at runtime.
-
-    Respects MCP_HUB_CONFIG_DIR environment variable; falls back to
-    DEFAULT_DATA_DIR.  Uses Path(...).resolve() to normalize macOS
-    symlinks.
-    """
-    env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
-    if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    return DEFAULT_DATA_DIR.resolve()
-
-
-DEFAULT_SAFE_BASE = _get_config_base()
-TOOL_NAME_PATTERN = re.compile(r'^(?:(?:@[\w\-]+/[\w\-]+)|[\w\-]+)$')
+# ---- Security constants and helpers (FIX-04) ----
+DEFAULT_SAFE_BASE = DEFAULT_DATA_DIR
+TOOL_NAME_PATTERN = re.compile(r'^(@[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+)$')
 
 _SYSTEM_DIRS = {
     Path("/etc"), Path("/usr"), Path("/bin"),
@@ -195,117 +181,21 @@ def safe_open_for_write(path: str):
 def safe_makedirs(path: str, mode: int = 0o700) -> None:
     """Create directories with explicit restricted permissions.
 
-    - Traverses all path components and rejects any symlink.
-    - Checks W_OK|X_OK on existing directories; refuses if not writable.
-    - Explicitly chmods 0o700 after creation.
-    - Re-verifies after creation to catch race-condition symlink swaps (TOCTOU).
+    - Rejects if the path itself is a symbolic link.
+    - Uses os.makedirs with explicit mode.
+    - Re-verifies after creation to catch race-condition symlink swaps.
     """
-    p = Path(path)
-    # Traverse every component and reject symlinks
-    for part in p.parents:
-        if part.exists() and part.is_symlink():
-            raise SecurityError(f"Path component is a symbolic link: {part}")
-    if p.exists() and p.is_symlink():
+    if os.path.islink(path):
         raise SecurityError(f"Path cannot be a symbolic link: {path}")
-
-    # Check existing directories for writability/executability
-    if p.exists():
-        if not os.access(str(p), os.W_OK | os.X_OK):
-            raise SecurityError(f"Directory is not writable/executable: {path}")
-    else:
-        # Check parent dirs up to the first existing one
-        for parent in p.parents:
-            if parent.exists():
-                if not os.access(str(parent), os.W_OK | os.X_OK):
-                    raise SecurityError(f"Parent directory is not writable/executable: {parent}")
-                break
 
     os.makedirs(path, mode=mode, exist_ok=True)
 
-    # TOCTOU: re-verify after creation
     if os.path.islink(path):
         raise SecurityError(
             f"Directory was replaced by symbolic link (TOCTOU): {path}"
         )
 
     os.chmod(path, mode)
-
-
-def _test_dir_writable(path: Path) -> None:
-    """Verify a directory is actually writable by creating a temporary file.
-
-    Raises MCPHubError if the directory is not writable.
-    """
-    test_file = path / ".mcp_hub_writable_test"
-    try:
-        test_file.write_text("test", encoding="utf-8")
-        test_file.unlink()
-    except (PermissionError, OSError) as exc:
-        raise MCPHubError(f"Directory is not writable: {path} — {exc}")
-
-
-# ---- CLI unified error handler (FIX-024) ----
-CATEGORY_CORRUPTED = ("corrupted data", "json", "decode", "parse")
-CATEGORY_PERMISSION = ("permission denied", "permission", "access denied")
-CATEGORY_MISSING = ("not found", "no such file", "does not exist", "missing")
-
-
-def _handle_cli_error(cmd_name: str, exc: Exception) -> None:
-    """Classify exceptions and emit sanitized, user-friendly messages."""
-    msg = str(exc).lower()
-    if any(c in msg for c in CATEGORY_CORRUPTED):
-        console.error(f"Data file is corrupted. Try running 'mcp-hub init --force' to reset.")
-    elif any(c in msg for c in CATEGORY_PERMISSION):
-        console.error(f"Permission denied. Check file/directory access rights.")
-    elif any(c in msg for c in CATEGORY_MISSING):
-        console.error(f"Required file or directory not found.")
-    elif isinstance(exc, SecurityError):
-        console.error(f"Security check failed: {exc}")
-    elif isinstance(exc, MCPHubError):
-        console.error(f"Operation failed: {exc}")
-    else:
-        console.error("An unexpected error occurred. Please check the logs.")
-    logger.debug("Error in %s: %s", cmd_name, exc)
-
-
-# ---- Output helpers (FIX-058) ----
-def _output_json(data: Union[list, dict]) -> None:
-    """Emit valid JSON to stdout; empty collections become [] or {}."""
-    if data is None:
-        data = []
-    typer.echo(json.dumps(data, indent=2, ensure_ascii=False))
-
-
-def _mask_env_values(env: Dict[str, str]) -> Dict[str, str]:
-    """Mask sensitive environment variable values for display."""
-    masked = {}
-    for key, value in env.items():
-        lower_key = key.lower()
-        if any(s in lower_key for s in ("api_key", "apikey", "api_secret", "apisecret", "secret", "token", "password", "auth", "credential")):
-            masked[key] = "***"
-        else:
-            masked[key] = value
-    return masked
-
-
-def _mask_hub_config(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Sanitize hub config for display: mask absolute command paths and env secrets."""
-    from copy import deepcopy
-    safe = deepcopy(data)
-    for client_name, client_cfg in safe.items():
-        if not isinstance(client_cfg, dict):
-            continue
-        servers = client_cfg.get("servers", {})
-        for server_name, server in servers.items():
-            if not isinstance(server, dict):
-                continue
-            cmd = server.get("command", "")
-            if cmd and os.path.isabs(cmd):
-                server["command"] = os.path.basename(cmd)
-            env = server.get("env", {})
-            if env:
-                server["env"] = _mask_env_values(env)
-    return safe
 
 
 def safe_rmtree(path: str) -> None:
@@ -350,17 +240,13 @@ _CMD_METACHARS = re.compile(r'[;|&$`\(\)<>{}\n\r]')
 def _validate_name(name: str) -> str:
     """Validate name format security.
 
-    Only allows Unicode word characters, underscore, and hyphen. Length 1-64.
+    Only allows alphanumeric, underscore, and hyphen. Length 1-64.
     """
     if not name or len(name) > MAX_NAME_LENGTH:
         raise MCPHubError(f"Name too long or empty (max {MAX_NAME_LENGTH} chars)")
-    if not re.match(r'^[\w\-]{1,64}$', name):
-        raise MCPHubError(f"Invalid name format: {name}. Only [\\w\\-] allowed.")
+    if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', name):
+        raise MCPHubError(f"Invalid name format: {name}. Only [a-zA-Z0-9_-] allowed.")
     return name
-
-
-# Command whitelist (FIX-08) — defensive; config.py has the canonical list
-_ALLOWED_COMMANDS = {"npx", "npm", "uvx", "node", "python", "python3", "docker", "uv"}
 
 
 def _validate_command(cmd: str) -> str:
@@ -384,10 +270,6 @@ def _validate_command(cmd: str) -> str:
     abs_cmd = os.path.abspath(os.path.normpath(os.path.expanduser(cmd)))
     if not os.path.exists(abs_cmd) or not os.access(abs_cmd, os.X_OK):
         raise MCPHubError("Command not found or not executable.")
-    # Defensive whitelist check on basename
-    cmd_name = os.path.basename(abs_cmd)
-    if cmd_name not in _ALLOWED_COMMANDS:
-        raise MCPHubError(f"Command '{cmd_name}' is not in the allowed list.")
     return abs_cmd
 
 
@@ -411,25 +293,16 @@ def _validate_args(args: List[str]) -> List[str]:
 def _validate_tags(tags: List[str]) -> List[str]:
     """Validate tag list.
 
-    Only allows Unicode word characters, underscore, and hyphen. Length 1-64.
+    Only allows alphanumeric, underscore, and hyphen. Length 1-64.
     """
     safe_tags = []
     for tag in tags:
         if not tag or len(tag) > MAX_NAME_LENGTH:
             raise MCPHubError(f"Tag too long or empty (max {MAX_NAME_LENGTH} chars)")
-        if not re.match(r'^[\w\-]{1,64}$', tag):
-            raise MCPHubError(f"Invalid tag format: {tag}. Only [\\w\\-] allowed.")
+        if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', tag):
+            raise MCPHubError(f"Invalid tag format: {tag}. Only [a-zA-Z0-9_-] allowed.")
         safe_tags.append(tag)
     return safe_tags
-
-
-def _validate_category(category: str) -> str:
-    """Validate category input: length limit and format checks to prevent ReDoS."""
-    if not category or len(category) > MAX_INPUT_LENGTH:
-        raise MCPHubError(f"Category too long or empty (max {MAX_INPUT_LENGTH} chars)")
-    if _SHELL_METACHARS.search(category):
-        raise MCPHubError(f"Category contains forbidden characters: {category}")
-    return category
 
 
 # ---- Display helper (FIX-03) ----
@@ -494,10 +367,6 @@ def init(
     'mcp-hub list' to verify the registry is populated.
     """
     try:
-        # FIX-090: detect missing HOME and warn
-        if not os.environ.get("HOME") and not os.environ.get("MCP_HUB_CONFIG_DIR"):
-            console.warning("HOME environment variable is not set. Using current directory as fallback.")
-
         validated_config_dir = _validate_config_dir(config_dir)
         base = validated_config_dir if validated_config_dir else DEFAULT_SAFE_BASE
 
@@ -511,30 +380,13 @@ def init(
 
         validated_registry = _resolve_and_validate(registry_path, base)
         validated_config = _resolve_and_validate(config_path, base)
-
-        # FIX-006: check existing files before init (unless --force)
-        reg_exists = Path(validated_registry).exists() if validated_registry else False
-        cfg_exists = Path(validated_config).exists() if validated_config else False
-        if not force and (reg_exists or cfg_exists):
-            if not sys.stdin.isatty():
-                console.error("Registry or config already exists. Use --force to overwrite.")
-                raise typer.Exit(1)
-            confirm = typer.confirm("Registry or config already exists. Overwrite?")
-            if not confirm:
-                console.info("Init cancelled")
-                raise typer.Exit(0)
-
         registry = Registry(validated_registry)
         config = ConfigManager(validated_config)
 
         # Ensure data directory exists
         safe_makedirs(str(base))
 
-        # FIX-031: preserve original timestamps when force-clearing
-        original_timestamps = {}
         if force:
-            for name, tool in registry.tools.items():
-                original_timestamps[name] = (tool.created_at, tool.updated_at)
             registry.tools.clear()
             config.configs.clear()
 
@@ -544,11 +396,6 @@ def init(
             for tool in builtin_tools:
                 if tool.name not in registry.tools or force:
                     registry.tools[tool.name] = tool
-                    # Restore timestamps if we cleared earlier
-                    if force and tool.name in original_timestamps:
-                        existing = registry.tools[tool.name]
-                        existing.created_at = original_timestamps[tool.name][0]
-                        existing.updated_at = original_timestamps[tool.name][1]
         registry._save()
         config._save()
 
@@ -559,10 +406,14 @@ def init(
 
         console.info(f"Registry: {_display_path(registry.registry_path)}")
         console.info(f"Config: {_display_path(config.config_path)}")
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Initialization failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("init", e)
+        console.error("An unexpected error occurred during initialization. Please check the logs.")
+        logger.error("Unexpected error in init: %s", e)
         raise typer.Exit(1)
 
 
@@ -582,31 +433,19 @@ def search(
     Returns a list of matching tools with their installation status.
     """
     try:
-        validated_registry = _resolve_and_validate(registry_path, _get_config_base())
+        validated_registry = _resolve_and_validate(registry_path, DEFAULT_SAFE_BASE)
         registry = Registry(validated_registry)
         tag_list = _validate_tags(tags.split(",")) if tags else None
-        # FIX-082: validate sort_by before calling search
-        valid_sort_fields = {"relevance", "stars", "name", "recent", "downloads"}
-        if sort_by not in valid_sort_fields:
-            console.error(f"Invalid sort_by: {sort_by}. Valid: {', '.join(valid_sort_fields)}")
-            raise typer.Exit(1)
-        # FIX-083: validate category
-        if category:
-            category = _validate_category(category)
         results = registry.search(query, category=category, tags=tag_list, limit=limit, sort_by=sort_by)
 
         if not results:
-            if json_output:
-                _output_json([])
-                return
             rich_console.print("[yellow]No tools found[/yellow]")
             rich_console.print("[dim]Tip: Run 'mcp-hub init' to create a registry with built-in tools, or verify the registry path with 'mcp-hub list --registry <path>'.[/dim]")
             return
 
         if json_output:
-            # FIX-055: use model_dump_public to mask sensitive env vars
-            tools_json = [tool.model_dump_public() for tool in results]
-            _output_json(tools_json)
+            tools_json = [tool.model_dump() for tool in results]
+            typer.echo(json.dumps(tools_json, indent=2, ensure_ascii=False))
             return
 
         table = Table(
@@ -627,10 +466,14 @@ def search(
             desc = tool.description[:60] + "..." if len(tool.description) > 60 else tool.description
             table.add_row(status, tool.name, tool.version, category, desc)
         rich_console.print(table)
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Search failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("search", e)
+        console.error("An unexpected error occurred during search. Please check the logs.")
+        logger.error("Unexpected error in search: %s", e)
         raise typer.Exit(1)
 
 
@@ -657,8 +500,8 @@ def install(
             console.error("Tool name is required")
             raise typer.Exit(1)
         sanitized_name = _sanitize_tool_name(tool_name)
-        validated_registry = _resolve_and_validate(registry_path, _get_config_base())
-        validated_base = _resolve_and_validate(base_dir, _get_config_base(), allow_base_dir=True)
+        validated_registry = _resolve_and_validate(registry_path, DEFAULT_SAFE_BASE)
+        validated_base = _resolve_and_validate(base_dir, DEFAULT_SAFE_BASE, allow_base_dir=True)
 
         registry = Registry(validated_registry)
         tool = registry.get(sanitized_name)
@@ -670,19 +513,12 @@ def install(
         installer = Installer(install_dir=validated_base)
 
         if dry_run:
-            # FIX-062/077: respect --method in dry-run
-            if method != "auto":
-                if method not in INSTALL_TYPES:
-                    console.error(f"Unsupported install method: {method}. Supported: {', '.join(INSTALL_TYPES)}")
-                    raise typer.Exit(1)
-                chosen_method = method
-            else:
-                chosen_method = installer._detect_install_method(tool)
             target_dir = os.path.join(
                 validated_base or str(DEFAULT_DATA_DIR / "installed"), sanitized_name
             )
+            install_method = getattr(tool, "install_method", None) or "auto-detected"
             console.info(f"[DRY RUN] Would install '{sanitized_name}':")
-            console.info(f"  Method: {chosen_method}")
+            console.info(f"  Method: {install_method}")
             console.info(f"  Target: {target_dir}")
             console.info(f"  Registry: {validated_registry or 'default'}")
             if hasattr(tool, "description") and tool.description:
@@ -704,9 +540,6 @@ def install(
                 console.error(f"Tool '{sanitized_name}' is already installed. Use --force to reinstall.")
                 raise typer.Exit(1)
 
-        # FIX-040/075: show progress hint with chosen method
-        chosen_method = method if method != "auto" else installer._detect_install_method(tool)
-        console.info(f"Connecting to remote registry via {chosen_method}... (timeout: 60s)")
         result = installer.install(sanitized_name, method=method if method != "auto" else None)
 
         if result.success:
@@ -723,27 +556,25 @@ def install(
                         if cm.add_server(cli_name, tool):
                             configured_clients.append(cli_name)
                     except Exception as e:
-                        # FIX-085: downgrade to debug to avoid exposing internal errors
                         logger.debug(f"Failed to configure {sanitized_name} for {cli_name}: {e}")
                 if configured_clients:
                     console.info(f"Configured for clients: {', '.join(configured_clients)}")
         else:
-            # FIX-041/076: detect network timeout and emit friendly error
-            err_msg = result.message or ""
-            if "timeout" in err_msg.lower() or "time out" in err_msg.lower() or "network timeout" in err_msg.lower():
-                console.error("Network timeout — please check your internet connection and try again.")
-            else:
-                console.error(result.message)
+            console.error(result.message)
             if result.errors:
                 # FIX-03: sanitize raw subprocess/filesystem errors in console output
                 console.error("Installation errors occurred. See logs for details.")
                 for error in result.errors:
                     logger.error("Install error detail for %s: %s", sanitized_name, error)
             raise typer.Exit(1)
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Installation failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("install", e)
+        console.error("An unexpected error occurred during installation. Please check the logs.")
+        logger.error("Unexpected error in install: %s", e)
         raise typer.Exit(1)
 
 
@@ -762,18 +593,11 @@ def uninstall(
     """
     try:
         sanitized_name = _sanitize_tool_name(tool_name)
-        validated_base = _resolve_and_validate(base_dir, _get_config_base(), allow_base_dir=True)
+        validated_base = _resolve_and_validate(base_dir, DEFAULT_SAFE_BASE, allow_base_dir=True)
 
-        # FIX-017: non-interactive detection for uninstall confirmation
+        # FIX: add confirmation prompt unless --yes is passed
         if not yes:
-            if not sys.stdin.isatty():
-                console.error(f"Non-interactive environment detected. Use --yes to uninstall '{sanitized_name}'.")
-                raise typer.Exit(1)
-            try:
-                confirm = typer.confirm(f"Are you sure you want to uninstall '{sanitized_name}'?")
-            except (EOFError, OSError):
-                console.error(f"Non-interactive environment detected. Use --yes to uninstall '{sanitized_name}'.")
-                raise typer.Exit(1)
+            confirm = typer.confirm(f"Are you sure you want to uninstall '{sanitized_name}'?")
             if not confirm:
                 console.info("Uninstall cancelled")
                 raise typer.Exit(0)
@@ -807,10 +631,14 @@ def uninstall(
             if purged:
                 cm._save()
                 console.info("Configuration purged")
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Uninstall failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("uninstall", e)
+        console.error("An unexpected error occurred during uninstall. Please check the logs.")
+        logger.error("Unexpected error in uninstall: %s", e)
         raise typer.Exit(1)
 
 
@@ -828,7 +656,7 @@ def list_tools(
     a specific category. Use --json for machine-readable output.
     """
     try:
-        validated_registry = _resolve_and_validate(registry_path, _get_config_base())
+        validated_registry = _resolve_and_validate(registry_path, DEFAULT_SAFE_BASE)
         registry = Registry(validated_registry)
         if installed:
             tools = registry.get_installed()
@@ -841,28 +669,13 @@ def list_tools(
             tools = [tool for tool in tools if any(cat_normalized == cat.lower().replace(" ", "") for cat in tool.categories)]
 
         if not tools:
-            # FIX-059: differentiated empty messages
-            if json_output:
-                _output_json([])
-                return
-            # Check if registry is initialized (file exists and has content)
-            reg_file = Path(registry.registry_path)
-            registry_initialized = reg_file.exists() and reg_file.stat().st_size > 2
-            if not registry_initialized:
-                rich_console.print("[yellow]Registry not initialized.[/yellow]")
-            elif installed:
-                rich_console.print("[yellow]No installed tools found.[/yellow]")
-            elif category:
-                rich_console.print(f"[yellow]No tools found in category '{category}'.[/yellow]")
-            else:
-                rich_console.print("[yellow]No tools found[/yellow]")
+            rich_console.print("[yellow]No tools found[/yellow]")
             rich_console.print("[dim]Tip: Run 'mcp-hub init' to create a registry with built-in tools, or verify the registry path with 'mcp-hub list --registry <path>'.[/dim]")
             return
 
         if json_output:
-            # FIX-055: use model_dump_public for safe JSON output
-            tools_data = [tool.model_dump_public() for tool in tools]
-            _output_json(tools_data)
+            tools_data = [tool.model_dump(mode="json") for tool in tools]
+            typer.echo(json.dumps(tools_data, indent=2, ensure_ascii=False))
         else:
             title = f"{'Installed ' if installed else ''}Tools ({len(tools)})"
             table = Table(
@@ -883,10 +696,14 @@ def list_tools(
                 desc = tool.description[:60] + "..." if len(tool.description) > 60 else tool.description
                 table.add_row(status, tool.name, tool.version, cat, desc)
             rich_console.print(table)
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"List failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("list", e)
+        console.error("An unexpected error occurred while listing tools. Please check the logs.")
+        logger.error("Unexpected error in list_tools: %s", e)
         raise typer.Exit(1)
 
 
@@ -899,7 +716,7 @@ def config(
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Server name (required for add/remove)")] = None,
     command: Annotated[Optional[str], typer.Option("--command", "-cmd", help="Absolute path to the server command (required for add)")] = None,
     args: Annotated[Optional[str], typer.Option("--args", "-a", help="Comma-separated arguments for the server command")] = None,
-    env: Annotated[Optional[List[str]], typer.Option("--env", "-e", help="Environment variables (KEY=VALUE, supports comma-separated format like 'KEY1=VALUE1,KEY2=VALUE2', can be used multiple times. If values contain commas, use multiple --env arguments)")] = None,
+    env: Annotated[Optional[List[str]], typer.Option("--env", "-e", help="Environment variables (KEY=VALUE, can be used multiple times)")] = None,
     import_path: Annotated[Optional[str], typer.Option("--import", "-i", help="Import configuration from a file (import action)")] = None,
     export_path: Annotated[Optional[str], typer.Option("--export", help="Export configuration to a file path (export action)")] = None,
 ) -> None:
@@ -910,7 +727,7 @@ def config(
     auto-configuring a tool for a client. Use --import to restore from a file.
     """
     try:
-        validated_config = _resolve_and_validate(config_path, _get_config_base())
+        validated_config = _resolve_and_validate(config_path, DEFAULT_SAFE_BASE)
         cm = ConfigManager(validated_config)
 
         if action not in _VALID_ACTIONS:
@@ -927,27 +744,21 @@ def config(
             command = _validate_command(command)
             arg_list = args.split(",") if args else []
             arg_list = _validate_args(arg_list)
-            # FIX-034: Parse env vars from --env KEY=VALUE (supports comma-separated)
+            # Parse env vars from --env KEY=VALUE (can be used multiple times)
             env_dict: Dict[str, str] = {}
             if env:
                 for env_var in env:
-                    # Support comma-separated env vars in a single --env argument
-                    for sub_var in env_var.split(","):
-                        sub_var = sub_var.strip()
-                        if not sub_var:
-                            continue
-                        if "=" not in sub_var:
-                            console.error(f"Invalid env format: {sub_var}. Use KEY=VALUE")
-                            raise typer.Exit(1)
-                        key, value = sub_var.split("=", 1)
-                        if not key.strip():
-                            console.error("Invalid env format: empty key")
-                            raise typer.Exit(1)
-                        env_dict[key] = value
+                    if "=" not in env_var:
+                        console.error(f"Invalid env format: {env_var}. Use KEY=VALUE")
+                        raise typer.Exit(1)
+                    key, value = env_var.split("=", 1)
+                    env_dict[key] = value
                 _validate_env(env_dict)
             cfg = MCPConfig(name=name, command=command, args=arg_list, env=env_dict)
-            # FIX-009: use add_server_config for dual-write sync
-            cm.add_server_config(target_client, cfg)
+            cm.configs.setdefault(
+                target_client, ClientConfig(client_name=target_client)
+            ).add_server(cfg)
+            cm._save()
             console.info(f"Added server configuration: {name}")
 
         elif action == "remove":
@@ -986,21 +797,13 @@ def config(
                 rich_console.print(table)
 
         elif action == "show":
-            if not os.path.exists(cm.config_path):
+            if os.path.exists(cm.config_path):
+                with open(cm.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                console.info(json.dumps(data, indent=2, ensure_ascii=False))
+            else:
                 console.info("No configuration file found.")
                 console.info(f"Config path: {_display_path(cm.config_path)}")
-                return
-            with open(cm.config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # FIX-036: filter by --client if specified
-            if client and client in data:
-                data = {client: data[client]}
-            elif client and client not in data:
-                rich_console.print(f"[yellow]No configuration found for client '{client}'.[/yellow]")
-                return
-            # FIX-056: mask sensitive fields before display
-            safe_data = _mask_hub_config(data)
-            console.info(json.dumps(safe_data, indent=2, ensure_ascii=False))
 
         elif action == "generate":
             mcp_json = cm.generate_mcp_json(target_client)
@@ -1058,10 +861,14 @@ def config(
         else:
             console.error(f"Unknown action: {action}")
             raise typer.Exit(1)
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Config operation failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("config", e)
+        console.error("An unexpected error occurred during config operation. Please check the logs.")
+        logger.error("Unexpected error in config: %s", e)
         raise typer.Exit(1)
 
 
@@ -1086,7 +893,7 @@ def scan(
         quick = False
 
     try:
-        validated_registry = _resolve_and_validate(registry_path, _get_config_base())
+        validated_registry = _resolve_and_validate(registry_path, DEFAULT_SAFE_BASE)
         registry = Registry(validated_registry)
         scanner = SecurityScanner(registry=registry)
 
@@ -1113,16 +920,10 @@ def scan(
             else:
                 report = scanner.scan(name, detailed=detailed)
 
-            # FIX-046: not_installed check before severity filter
-            if getattr(report, "status", "scanned") == "not_installed":
-                console.info(f"Tool '{name}' is not installed. Skipping scan.")
-                continue
-
             # Severity filter
             if severity:
                 severity_upper = severity.upper()
-                # FIX-045: add CRITICAL to valid levels
-                valid_levels = ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "VERIFIED", "CRITICAL"]
+                valid_levels = ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "VERIFIED"]
                 if severity_upper not in valid_levels:
                     console.error(f"Invalid severity level: {severity}. Valid: {', '.join(valid_levels)}")
                     has_error = True
@@ -1134,14 +935,13 @@ def scan(
 
             if quick:
                 if json_output:
-                    _output_json({"tool_name": name, "score": report.overall_score})
+                    typer.echo(json.dumps({"tool_name": name, "score": report.overall_score}, indent=2, ensure_ascii=False))
                 else:
                     score_color = "green" if report.overall_score >= 80 else "yellow" if report.overall_score >= 50 else "red"
                     rich_console.print(f"Security Quick Scan for {name}: [{score_color}]{report.overall_score}/100[/{score_color}]")
             else:
                 if json_output:
-                    # FIX-068: use to_dict with exclude_none=True
-                    _output_json(report.to_dict(exclude_none=True))
+                    typer.echo(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
                     continue
 
                 # Color-code security level
@@ -1151,7 +951,6 @@ def scan(
                     "MEDIUM": "yellow",
                     "HIGH": "green",
                     "VERIFIED": "cyan",
-                    "CRITICAL": "red",
                 }.get(report.security_level.name, "white")
 
                 score_color = "green" if report.overall_score >= 80 else "yellow" if report.overall_score >= 50 else "red"
@@ -1246,10 +1045,14 @@ def scan(
 
         if has_error:
             raise typer.Exit(1)
+    except (MCPHubError, SecurityError) as e:
+        console.error(f"Scan failed: {e}")
+        raise typer.Exit(1)
     except typer.Exit:
         raise
     except Exception as e:
-        _handle_cli_error("scan", e)
+        console.error("An unexpected error occurred during security scan. Please check the logs.")
+        logger.error("Unexpected error in scan: %s", e)
         raise typer.Exit(1)
 
 
@@ -1259,4 +1062,4 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
         typer.echo("mcp-hub 0.1.0")
         sys.exit(0)
-    app(prog_name="mcp-hub")
+    app()

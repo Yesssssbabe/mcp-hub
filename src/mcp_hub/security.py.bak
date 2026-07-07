@@ -2,6 +2,11 @@ import os
 import re
 import json
 import time
+import sys
+import ast
+import threading
+import importlib.util
+import functools
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +20,22 @@ from mcp_hub.constants import (
 from mcp_hub.registry import Registry, MCPTool
 
 logger = logging.getLogger(__name__)
+
+# Optional parser libraries — prefer standard/specialized parsers over regex
+# TOML: Python 3.11+ has tomllib; fall back to tomli for 3.9–3.10
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    try:
+        import tomli as tomllib
+    except ImportError:  # pragma: no cover
+        tomllib = None
+
+# packaging: usually available because pip depends on it; guard anyway
+try:
+    from packaging.requirements import Requirement
+except ImportError:  # pragma: no cover
+    Requirement = None
 
 
 class SecurityLevel(IntEnum):
@@ -74,90 +95,90 @@ class SecurityScanner:
     
     RISK_PATTERNS = {
         "filesystem_access": [
-            r"open\s*\(.*['\"]\s*['\"]\s*['\"]w",
-            r"os\.remove\s*\(",
-            r"shutil\.(rmtree|move|copy)",
-            r"pathlib\..*\.unlink\s*\(",
-            r"open\s*\(.*['\"]w",
-            r"os\.rmdir\s*\(",
-            r"os\.mkdir\s*\(",
-            r"os\.makedirs\s*\(",
-            r"pathlib\..*\.write_text\s*\(",
-            r"pathlib\..*\.write_bytes\s*\(",
-            r"\.write\s*\(",
-            r"\.writelines\s*\(",
-            r"os\.rename\s*\(",
-            r"os\.replace\s*\(",
-            r"shutil\.copytree\s*\(",
-            r"shutil\.copyfile\s*\(",
+            r"\bopen\s*\([^)]*,\s*['\"](w|w\+|a|a\+|x|x\+)['\"]",
+            r"\bos\.remove\s*\(",
+            r"\bshutil\.(rmtree|move|copy|copytree|copyfile)\b",
+            r"\bpathlib\..*\.unlink\s*\(",
+            r"\bos\.rmdir\s*\(",
+            r"\bos\.mkdir\s*\(",
+            r"\bos\.makedirs\s*\(",
+            r"\bpathlib\..*\.write_text\s*\(",
+            r"\bpathlib\..*\.write_bytes\s*\(",
+            r"\bos\.rename\s*\(",
+            r"\bos\.replace\s*\(",
+            r"\btempfile\.mktemp\s*\(",
+            r"\btarfile\.(extractall|extract)\b",
+            r"\bzipfile\.(extractall|extract)\b",
         ],
         "network_access": [
-            r"requests\.(get|post|put|delete|patch|head|options)",
-            r"urllib\.(request|urlopen)",
-            r"http\.client\.",
-            r"socket\.",
-            r"fetch\s*\(",
-            r"\.send\s*\(",
-            r"\.recv\s*\(",
-            r"httpx\.(get|post|put|delete|patch)",
-            r"aiohttp\.(ClientSession|get|post)",
-            r"urllib3\.(PoolManager|RequestMethods)",
-            r"urllib\.request\.(urlopen|urlretrieve|Request)",
-            r"websocket\.(connect|create_connection)",
-            r"httplib\.(HTTPConnection|HTTPSConnection)",
+            r"\brequests\.(get|post|put|delete|patch|head|options)\b",
+            r"\burllib\.request\.(urlopen|urlretrieve|Request)\b",
+            r"\bhttp\.client\.(HTTPConnection|HTTPSConnection)\b",
+            r"\bsocket\.(socket|create_connection|connect)\b",
+            r"\bhttpx\.(get|post|put|delete|patch)\b",
+            r"\baiohttp\.(ClientSession|get|post)\b",
+            r"\burllib3\.(PoolManager|RequestMethods)\b",
+            r"\bwebsocket\.(connect|create_connection)\b",
+            r"\bhttplib\.(HTTPConnection|HTTPSConnection)\b",
         ],
         "command_execution": [
-            r"os\.system\s*\(",
-            r"subprocess\.(call|run|Popen|check_output|check_call)",
-            r"eval\s*\(",
-            r"exec\s*\(",
-            r"shelljs",
-            r"child_process\.",
-            r"spawn\s*\(",
-            r"exec\s*\(",
-            r"execSync\s*\(",
-            r"execFile\s*\(",
-            r"compile\s*\(",
-            r"compileString\s*\(",
-            r"new\s+Function\s*\(",
-            r"vm\.(runInContext|runInNewContext|runInThisContext)",
-            r"pickle\.(loads|load)",
-            r"yaml\.(load|unsafe_load)",
+            r"\bos\.system\s*\(",
+            r"\bos\.(popen|popen2|popen3|popen4)\b",
+            r"\bos\.spawn(l|le|lp|v|ve|vp|vpe)\b",
+            r"\bos\.exec(l|le|lp|v|ve|vp|vpe)\b",
+            r"\bos\.startfile\b",
+            r"\bsubprocess\.(call|run|Popen|check_output|check_call)\b",
+            r"\beval\s*\(",
+            r"\bexec\s*\(",
+            r"\bcompile\s*\(",
+            r"\bnew\s+Function\s*\(",
+            r"\bvm\.(runInContext|runInNewContext|runInThisContext)\b",
+            r"\bpickle\.(loads|load)\b",
+            r"\bmarshal\.(loads|load)\b",
+            r"\byaml\.(load|unsafe_load)\b",
+            r"\bgetattr\s*\([^)]*['\"](system|eval|exec|popen|compile)['\"]",
+            r"\bsetattr\s*\(",
         ],
         "sensitive_data": [
-            r"password\s*[=:]",
-            r"token\s*[=:]",
-            r"api[_-]?key\s*[=:]",
-            r"secret\s*[=:]",
-            r"private[_-]?key",
-            r"passwd\s*[=:]",
-            r"auth\s*[=:]",
-            r"credential\s*[=:]",
-            r"bearer\s+",
-            r"basic\s+auth",
-            r"aws_access_key",
-            r"aws_secret_key",
-            r"database_url\s*[=:]",
-            r"connection_string\s*[=:]",
-            r"\.env\s*load",
-            r"load_dotenv",
+            r"\bpassword\s*=\s*['\"]",
+            r"\btoken\s*=\s*['\"]",
+            r"\bapi[_-]?key\s*=\s*['\"]",
+            r"\bsecret\s*=\s*['\"]",
+            r"\bprivate[_-]?key\s*=\s*['\"]",
+            r"\bpasswd\s*=\s*['\"]",
+            r"\bauth\s*=\s*['\"]",
+            r"\bcredential\s*=\s*['\"]",
+            r"\bbearer\s+['\"]",
+            r"\bbasic\s+auth\s*=\s*['\"]",
+            r"\baws_access_key\s*=\s*['\"]",
+            r"\baws_secret_key\s*=\s*['\"]",
+            r"\bdatabase_url\s*=\s*['\"]",
+            r"\bconnection_string\s*=\s*['\"]",
+            r"\bload_dotenv\b",
         ],
         "data_exfiltration": [
-            r"send.*data",
-            r"upload.*file",
-            r"post.*json",
-            r"xmlhttprequest",
-            r"\.send\s*\(",
-            r"\.upload\s*\(",
-            r"\.transmit\s*\(",
-            r"\.forward\s*\(",
-            r"\.relay\s*\(",
-            r"\.pipe\s*\(",
-            r"\.redirect\s*\(",
-            r"\.proxy\s*\(",
-            r"\.tunnel\s*\(",
-            r"\.exfiltrate\s*\(",
-            r"\.export\s*\(.*data",
+            r"\brequests\.(post|put|patch)\s*\(.*\b(json|data|files)\s*=",
+            r"\burllib\.request\.urlopen\s*\(.*\bdata\s*=",
+            r"\bxmlhttprequest\b",
+        ],
+        "foreign_function": [
+            r"\bctypes\.(CDLL|cdll|windll|pythonapi|PyDLL)\b",
+            r"\bcffi\.FFI\b",
+            r"\bffi\.dlopen\b",
+        ],
+        "dynamic_import": [
+            r"\bimportlib\.import_module\b",
+            r"\bimportlib\.util\.spec_from_file_location\b",
+            r"\bimportlib\.util\.module_from_spec\b",
+            r"\b__import__\b",
+        ],
+        "obfuscated_execution": [
+            r"\b(eval|exec|compile)\s*\(\s*base64\.(b64decode|decode)",
+        ],
+        "environment_manipulation": [
+            r"\bsys\.path\.(insert|append)\b",
+            r"\bos\.environ\s*\[",
+            r"\bos\.environ\.(get|setdefault|pop)\b",
         ],
     }
     
@@ -182,6 +203,21 @@ class SecurityScanner:
             "registry": "注册表访问可修改系统配置",
             "kernel": "内核访问可绕过所有安全机制",
         },
+    }
+    
+    # Permission risk severity weights (higher = more dangerous)
+    RISK_SEVERITY_WEIGHTS = {
+        "command:shell": 50,      # 致命 — 任意代码执行
+        "system:root": 45,        # 致命 — 完全控制系统
+        "system:kernel": 40,      # 致命 — 内核级访问
+        "filesystem:execute": 30,  # 高危 — 可执行任意文件
+        "network:outbound": 20,  # 高危 — 出站网络
+        "network:raw": 20,       # 高危 — 原始网络
+        "command:process": 18,   # 中高危 — 进程创建
+        "filesystem:delete": 15, # 中高危 — 文件删除
+        "network:inbound": 12,   # 中高危 — 入站网络
+        "system:registry": 12,   # 中高危 — 注册表
+        "filesystem:write": 12,  # 中高危 — 文件写入
     }
     
     # Score weights
@@ -240,6 +276,18 @@ class SecurityScanner:
     
     # Maximum files to scan per tool to avoid performance issues
     MAX_FILES_PER_SCAN = 500
+
+    # Security limits for ReDoS/performance protection
+    MAX_LINE_LENGTH = 10000           # 10KB per line
+    MAX_SCAN_DURATION_SECONDS = 30.0  # 30 seconds total scan time limit
+    MAX_DEP_FILE_SIZE = 10 * 1024 * 1024  # 10MB dependency file size limit
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB file size limit
+    MAX_ENUMERATED_PATHS = 2000       # limit rglob enumeration
+    MAX_LINES_PER_FILE = 50000        # limit lines processed per file
+    RE_TIMEOUT = 5.0                  # 5 seconds regex match timeout (Python 3.11+)
+
+    # Concurrent scan limit
+    _scan_semaphore = threading.Semaphore(2)
     
     # Code file extensions to scan
     CODE_EXTENSIONS = {
@@ -251,8 +299,97 @@ class SecurityScanner:
     }
     
     def __init__(self, registry: Optional[Registry] = None):
-        self.registry = registry or Registry()
+        self.registry = registry if registry is not None else Registry()
         self._prerequisites_cache: Optional[Dict[str, bool]] = None
+        self._pattern_cache: Dict[Tuple[str, int], re.Pattern] = {}
+    
+    # ──────────────────────────────────────────────────────────────
+    #  Regex Safety Utilities
+    # ──────────────────────────────────────────────────────────────
+
+    def _compile_pattern(self, pattern: str, flags: int = 0) -> re.Pattern:
+        """Compile and cache regex pattern with optional Python 3.11+ timeout."""
+        key = (pattern, flags)
+        if key not in self._pattern_cache:
+            if sys.version_info >= (3, 11):
+                self._pattern_cache[key] = re.compile(pattern, flags, timeout=self.RE_TIMEOUT)
+            else:
+                self._pattern_cache[key] = re.compile(pattern, flags)
+        return self._pattern_cache[key]
+
+    def _safe_search(self, compiled: re.Pattern, text: str) -> Optional[re.Match]:
+        """Search with timeout protection, logging on regex timeout."""
+        _timeout_err = getattr(re, "TimeoutError", None)
+        try:
+            if sys.version_info >= (3, 11):
+                return compiled.search(text, timeout=self.RE_TIMEOUT)
+            return compiled.search(text)
+        except Exception as e:
+            if _timeout_err is not None and isinstance(e, _timeout_err):
+                logger.warning(f"Regex timeout for pattern: {compiled.pattern[:50]}...")
+                return None
+            raise
+
+    def _get_python_excluded_lines(self, source: str) -> Set[int]:
+        """Return line numbers that belong to __main__ blocks or multiline strings.
+
+        Used to reduce false positives from regex-based Python scanning.
+        """
+        excluded: Set[int] = set()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return excluded
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                start = getattr(node, "lineno", None)
+                end = getattr(node, "end_lineno", start)
+                # Exclude all lines of multiline string literals
+                if start and end and end > start:
+                    for ln in range(start, end + 1):
+                        excluded.add(ln)
+            elif isinstance(node, ast.If):
+                # Detect `if __name__ == "__main__":` guard blocks
+                cond = node.test
+                if (
+                    isinstance(cond, ast.Compare)
+                    and isinstance(cond.left, ast.Name)
+                    and cond.left.id == "__name__"
+                    and len(cond.ops) == 1
+                    and isinstance(cond.ops[0], ast.Eq)
+                    and len(cond.comparators) == 1
+                    and isinstance(cond.comparators[0], ast.Constant)
+                    and cond.comparators[0].value == "__main__"
+                ):
+                    start = getattr(node, "lineno", None)
+                    end = getattr(node, "end_lineno", start)
+                    if start:
+                        for ln in range(start, (end or start) + 1):
+                            excluded.add(ln)
+        return excluded
+
+    def _get_python_string_spans(self, source: str) -> Dict[int, List[Tuple[int, int]]]:
+        """Return per-line column spans of single-line string literals.
+
+        Regex matches that fall inside these spans are ignored.
+        """
+        spans: Dict[int, List[Tuple[int, int]]] = {}
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return spans
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                start = getattr(node, "lineno", None)
+                end = getattr(node, "end_lineno", start)
+                if start and start == end:
+                    col_start = getattr(node, "col_offset", None)
+                    col_end = getattr(node, "end_col_offset", None)
+                    if col_start is not None and col_end is not None:
+                        spans.setdefault(start, []).append((col_start, col_end))
+        return spans
     
     # ──────────────────────────────────────────────────────────────
     #  Public API
@@ -293,10 +430,12 @@ class SecurityScanner:
         # Step 3: Scan source code
         code_analysis = self._scan_source_code(tool, install_path, detailed=detailed)
         code_risk = code_analysis.get("total_risk_score", 0)
+        code_scanned = code_analysis.get("status") == "completed"
         
         # Step 4: Check dependencies
         dependency_analysis = self._check_dependencies(tool, install_path)
         dependency_risk = dependency_analysis.get("total_risk", 0)
+        dependencies_scanned = dependency_analysis.get("status") == "completed"
         
         # Step 5: Analyze network access
         network_analysis = self._analyze_network_access(tool)
@@ -304,11 +443,14 @@ class SecurityScanner:
         
         # Step 6: Calculate overall score
         overall_score = self._calculate_score(
-            permissions_risk, code_risk, dependency_risk, network_risk
+            permissions_risk, code_risk, dependency_risk, network_risk,
+            code_scanned=code_scanned, dependencies_scanned=dependencies_scanned
         )
         
         # Determine security level
-        security_level = self._determine_security_level(overall_score, code_risk, dependency_risk)
+        security_level = self._determine_security_level(
+            overall_score, code_risk, dependency_risk, permissions_risk
+        )
         
         # Step 7: Create report
         scan_duration = time.time() - start_time
@@ -337,15 +479,24 @@ class SecurityScanner:
         
         return report
     
-    def quick_scan(self, tool_name: str) -> int:
-        """Quick security score (0-100) without detailed analysis.
-        
+    def quick_scan(self, tool_name: str) -> SecurityReport:
+        """Quick security scan without detailed analysis.
+
         This is a lightweight scan that skips code snippet collection
         and detailed dependency analysis. Suitable for batch operations.
-        
+
         Args:
             tool_name: Name of the MCP tool to scan
-            
+
+        Returns:
+            SecurityReport with analysis results
+        """
+        report = self.scan(tool_name, detailed=False)
+        return report
+
+    def quick_scan_score(self, tool_name: str) -> int:
+        """Quick security score (0-100) without detailed analysis.
+
         Returns:
             Integer score from 0 (high risk) to 100 (low risk)
         """
@@ -401,12 +552,8 @@ class SecurityScanner:
             return False
         
         def _module_exists(module: str) -> bool:
-            """Check if a Python module is importable."""
-            try:
-                __import__(module)
-                return True
-            except ImportError:
-                return False
+            """Check if a Python module is importable without executing it."""
+            return importlib.util.find_spec(module) is not None
         
         prerequisites = {
             "npm_audit": _command_exists("npm"),
@@ -615,7 +762,8 @@ class SecurityScanner:
             for category, risks in self.HIGH_RISK_PERMISSIONS.items():
                 for risk_type, risk_desc in risks.items():
                     if risk_type in perm_str or any(kw in perm_str for kw in risk_type.split()):
-                        risk_score += 15
+                        full_key = f"{category}:{risk_type}"
+                        risk_score = self.RISK_SEVERITY_WEIGHTS.get(full_key, 15)
                         level = "high"
                         description = risk_desc
                         break
@@ -640,7 +788,7 @@ class SecurityScanner:
                         break
             
             if level == "low" and risk_score == 0:
-                risk_score = 2
+                risk_score = self.RISK_THRESHOLD_LOW
             
             permissions_detail[perm] = {
                 "level": level,
@@ -664,6 +812,16 @@ class SecurityScanner:
         result["missing_permissions"] = missing
         result["declared_count"] = len(declared)
         result["missing_count"] = len(missing)
+        
+        # Classify overall permission risk using RISK_THRESHOLD_* constants
+        if total_risk >= self.RISK_THRESHOLD_HIGH:
+            result["risk_level"] = "critical"
+        elif total_risk >= self.RISK_THRESHOLD_MEDIUM:
+            result["risk_level"] = "high"
+        elif total_risk >= self.RISK_THRESHOLD_LOW:
+            result["risk_level"] = "medium"
+        else:
+            result["risk_level"] = "low"
         
         return result
     
@@ -702,89 +860,181 @@ class SecurityScanner:
         
         install_path = Path(install_path)
         
-        # Compile patterns
+        # Compile patterns (with caching and optional timeout)
         compiled_patterns = {}
         for pattern_type, patterns in self.RISK_PATTERNS.items():
-            compiled_patterns[pattern_type] = [re.compile(p, re.IGNORECASE) for p in patterns]
+            compiled_patterns[pattern_type] = [self._compile_pattern(p, re.IGNORECASE) for p in patterns]
         
         # Risk weights per pattern type
         risk_weights = {
-            "command_execution": 5,    # 每次匹配扣5分
+            "command_execution": 5,
+            "foreign_function": 10,
+            "dynamic_import": 5,
+            "obfuscated_execution": 8,
             "data_exfiltration": 4,
             "sensitive_data": 3,
             "filesystem_access": 2,
             "network_access": 2,
+            "environment_manipulation": 3,
         }
         
         files_scanned = 0
-        files_skipped = 0
         total_lines = 0
+        total_paths_enumerated = 0
         
         # Scan files
         skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".tox", ".pytest_cache"}
+        blocked_roots = {"/dev", "/proc", "/sys"}
         
-        for path in install_path.rglob("*"):
-            if files_scanned >= self.MAX_FILES_PER_SCAN:
-                files_skipped += sum(1 for _ in install_path.rglob("*")) - files_scanned
-                break
-            
-            if not path.is_file():
-                continue
-            
-            # Skip known directories
-            if any(part in skip_dirs for part in path.parts):
-                continue
-            
-            # Check extension
-            if path.suffix not in self.CODE_EXTENSIONS:
-                # Also allow files without extension if they're executable scripts
-                if path.suffix == "" and path.stat().st_size < 1024 * 1024:  # < 1MB
-                    pass
-                else:
-                    continue
-            
-            # Skip binary files (check for null bytes in first 1KB)
-            try:
-                with open(path, "rb") as f:
-                    sample = f.read(1024)
-                    if b"\x00" in sample:
+        start_time = time.time()
+        
+        with self._scan_semaphore:
+            for path in install_path.rglob("*"):
+                total_paths_enumerated += 1
+                
+                # Limit total enumerated paths to prevent rglob DoS
+                if total_paths_enumerated > self.MAX_ENUMERATED_PATHS:
+                    logger.warning("Security scan reached max enumerated paths, aborting.")
+                    break
+                
+                # Total scan time limit
+                if time.time() - start_time > self.MAX_SCAN_DURATION_SECONDS:
+                    logger.warning("Security scan timeout reached, aborting scan.")
+                    break
+                
+                # Max files per scan limit
+                if files_scanned >= self.MAX_FILES_PER_SCAN:
+                    break
+                
+                # Reject symlinks before any other file check
+                try:
+                    if path.is_symlink():
                         continue
-            except (IOError, OSError):
-                continue
-            
-            files_scanned += 1
-            
-            # Scan file content
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-            except (IOError, OSError, UnicodeDecodeError):
-                files_skipped += 1
-                continue
-            
-            total_lines += len(lines)
-            
-            for line_num, line in enumerate(lines, 1):
-                line_stripped = line.strip()
-                # Skip comments and docstrings (basic heuristic)
-                if line_stripped.startswith("#") or line_stripped.startswith("//") or \
-                   line_stripped.startswith("*") or line_stripped.startswith("/*") or \
-                   line_stripped.startswith("<!--") or line_stripped.startswith("--"):
+                except (OSError, IOError):
                     continue
                 
-                for pattern_type, compiled_list in compiled_patterns.items():
-                    for compiled in compiled_list:
-                        if compiled.search(line):
-                            result["pattern_counts"][pattern_type] += 1
-                            
-                            snippet = line.strip()[:200]  # Limit snippet length
-                            match_info = {
-                                "file": str(path.relative_to(install_path)),
-                                "line": line_num,
-                                "snippet": snippet if detailed else "(redacted in quick scan)",
-                            }
-                            result["pattern_matches"][pattern_type].append(match_info)
-                            break  # Only count one match per pattern type per line
+                if not path.is_file():
+                    continue
+                
+                # Skip known directories
+                if any(part in skip_dirs for part in path.parts):
+                    continue
+                
+                # Reject paths pointing to pseudo-filesystems
+                try:
+                    real_path = path.resolve()
+                    real_path_str = str(real_path)
+                    if any(real_path_str.startswith(br) for br in blocked_roots):
+                        continue
+                except (OSError, IOError):
+                    continue
+                
+                # Check extension
+                if path.suffix not in self.CODE_EXTENSIONS:
+                    # Allow only small text files without extension
+                    if path.suffix == "":
+                        try:
+                            if path.stat().st_size > 1024 * 1024:
+                                continue
+                        except (OSError, IOError):
+                            continue
+                    else:
+                        continue
+                
+                # Unified file size limit for all scanned files (10MB)
+                try:
+                    if path.stat().st_size > self.MAX_FILE_SIZE:
+                        continue
+                except (OSError, IOError):
+                    continue
+                
+                # Skip binary files (check for null bytes in first 1KB)
+                try:
+                    with open(path, "rb") as f:
+                        sample = f.read(1024)
+                        if b"\x00" in sample:
+                            continue
+                except (IOError, OSError):
+                    continue
+                
+                files_scanned += 1
+                
+                # Scan file content
+                file_line_count = 0
+                is_python = path.suffix == ".py"
+                excluded_lines: Set[int] = set()
+                string_spans: Dict[int, List[Tuple[int, int]]] = {}
+                try:
+                    if is_python:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            source = f.read(self.MAX_FILE_SIZE + 1)
+                        if len(source) > self.MAX_FILE_SIZE:
+                            continue
+                        excluded_lines = self._get_python_excluded_lines(source)
+                        string_spans = self._get_python_string_spans(source)
+                        line_iter = enumerate(source.splitlines(keepends=True), 1)
+                    else:
+                        f = open(path, "r", encoding="utf-8", errors="ignore")
+                        line_iter = enumerate(f, 1)
+                    
+                    for line_num, line in line_iter:
+                        # Limit lines per file
+                        if file_line_count >= self.MAX_LINES_PER_FILE:
+                            break
+                        
+                        # Limit line length
+                        if len(line) > self.MAX_LINE_LENGTH:
+                            line = line[:self.MAX_LINE_LENGTH]
+                        
+                        file_line_count += 1
+                        total_lines += 1
+                        
+                        # Skip lines inside __main__ blocks or multiline strings in Python
+                        if line_num in excluded_lines:
+                            continue
+                        
+                        line_stripped = line.strip()
+                        # Skip comments and docstrings (basic heuristic)
+                        if line_stripped.startswith("#") or line_stripped.startswith("//") or \
+                           line_stripped.startswith("*") or line_stripped.startswith("/*") or \
+                           line_stripped.startswith("<!--") or line_stripped.startswith("--"):
+                            continue
+                        
+                        for pattern_type, compiled_list in compiled_patterns.items():
+                            for compiled in compiled_list:
+                                match = self._safe_search(compiled, line)
+                                if not match:
+                                    continue
+                                # Ignore matches that fall inside Python string literals
+                                if is_python:
+                                    in_string = False
+                                    for start_col, end_col in string_spans.get(line_num, []):
+                                        if match.start() < end_col and match.end() > start_col:
+                                            in_string = True
+                                            break
+                                    if in_string:
+                                        continue
+                                result["pattern_counts"][pattern_type] += 1
+                                
+                                snippet = line.strip()[:200]  # Limit snippet length
+                                match_info = {
+                                    "file": str(path.relative_to(install_path)),
+                                    "line": line_num,
+                                    "snippet": snippet if detailed else "(redacted in quick scan)",
+                                }
+                                result["pattern_matches"][pattern_type].append(match_info)
+                                break  # Only count one match per pattern type per line
+                except (IOError, OSError, UnicodeDecodeError):
+                    continue
+                finally:
+                    if not is_python and "f" in locals():
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+        
+        # Calculate skipped files based on enumerated paths
+        files_skipped = total_paths_enumerated - files_scanned
         
         # Calculate total risk score
         total_risk = 0
@@ -842,6 +1092,22 @@ class SecurityScanner:
         for dep_file_name, dep_type in self.DEPENDENCY_FILES.items():
             dep_file_path = install_path / dep_file_name
             if dep_file_path.exists():
+                # Security: path traversal and symlink validation
+                try:
+                    resolved = dep_file_path.resolve()
+                    install_resolved = install_path.resolve()
+                    if not str(resolved).startswith(str(install_resolved)):
+                        logger.warning(f"Path traversal detected: {dep_file_path}")
+                        continue
+                    if resolved.is_symlink():
+                        logger.warning(f"Skipping symlink dependency file: {dep_file_path}")
+                        continue
+                    if not resolved.is_file():
+                        logger.warning(f"Skipping non-file dependency path: {dep_file_path}")
+                        continue
+                except (OSError, ValueError) as e:
+                    logger.warning(f"Path validation error for {dep_file_path}: {e}")
+                    continue
                 dep_files_found.append(dep_file_name)
                 try:
                     deps = self._parse_dependency_file(dep_file_path, dep_type)
@@ -863,7 +1129,7 @@ class SecurityScanner:
             
             # Check against risky dependency patterns
             for risk_name, risk_info in self.RISKY_DEPENDENCIES.items():
-                pattern = re.compile(risk_info["pattern"], re.IGNORECASE)
+                pattern = self._compile_pattern(risk_info["pattern"], re.IGNORECASE)
                 if pattern.match(dep["name"]):
                     severity = risk_info["severity"]
                     if severity == "high":
@@ -876,13 +1142,8 @@ class SecurityScanner:
             version = dep.get("version", "")
             if version:
                 if any(tag in version.lower() for tag in ["dev", "alpha", "beta", "rc", "snapshot", "nightly"]):
-                    dep_risk += 5
-                    risk_reasons.append(f"预发布版本: {version}")
-                
-                # Check for very old versions (heuristic)
-                if re.match(r"^0\.", version):
                     dep_risk += 3
-                    risk_reasons.append("主版本为0，可能不稳定")
+                    risk_reasons.append(f"预发布版本: {version}")
             
             dep["risk_score"] = dep_risk
             dep["risk_reasons"] = risk_reasons
@@ -993,17 +1254,19 @@ class SecurityScanner:
             risk_score += min(len(endpoints) * 2, 20)
             
             # Check for known risky domains
-            risky_domains = ["localhost", "127.0.0.1", "0.0.0.0"]
+            risky_domains = ["0.0.0.0"]
             for endpoint in endpoints:
                 endpoint_lower = endpoint.lower()
                 if any(rd in endpoint_lower for rd in risky_domains):
                     risk_score += 8
-                # Check for HTTP vs HTTPS
+                # Check for HTTP vs HTTPS (localhost is considered safe)
                 if endpoint_lower.startswith("http://") and not endpoint_lower.startswith("http://localhost"):
                     risk_score += 5
                 # Check for wildcards
-                if "*" in endpoint or "{}" in endpoint:
+                if "*" in endpoint and not endpoint.startswith("*."):
                     risk_score += 10
+                if "{}" in endpoint and re.search(r"\{\s*\}", endpoint):
+                    risk_score += 5
         
         # If tool has network code patterns but no declared permissions
         if not has_network_perm and not endpoints:
@@ -1022,23 +1285,23 @@ class SecurityScanner:
         return result
     
     def _calculate_score(self, permissions_risk: int, code_risk: int, 
-                         dependency_risk: int, network_risk: int) -> int:
+                         dependency_risk: int, network_risk: int,
+                         code_scanned: bool = True,
+                         dependencies_scanned: bool = True) -> int:
         """Calculate overall security score (0-100, higher is better).
         
-        Uses weighted scoring:
-        - permissions: 30%
-        - code: 35%
-        - dependencies: 20%
-        - network: 15%
-        
-        Each dimension starts at 100 and is reduced by its risk score.
-        The weighted average is then clamped to [0, 100].
+        Uses non-linear scoring with max-risk penalty:
+        - Base score from weighted dimensions
+        - Penalty applied based on maximum single-dimension risk
+        - Uninstalled tools receive explicit penalty
         
         Args:
             permissions_risk: Risk score from permission analysis (0-100)
             code_risk: Risk score from code analysis (0-100)
             dependency_risk: Risk score from dependency analysis (0-100)
             network_risk: Risk score from network analysis (0-100)
+            code_scanned: Whether source code was successfully scanned
+            dependencies_scanned: Whether dependencies were successfully scanned
             
         Returns:
             Integer score from 0 to 100
@@ -1049,13 +1312,22 @@ class SecurityScanner:
         dep_score = max(0, 100 - dependency_risk)
         net_score = max(0, 100 - network_risk)
         
-        # Weighted average
-        overall = (
+        # Base weighted average
+        base = (
             perm_score * self.WEIGHT_PERMISSIONS +
             code_score * self.WEIGHT_CODE +
             dep_score * self.WEIGHT_DEPENDENCIES +
             net_score * self.WEIGHT_NETWORK
         )
+        
+        # Non-linear penalty: max single-dimension risk above 40 triggers extra penalty
+        max_risk = max(permissions_risk, code_risk, dependency_risk, network_risk)
+        penalty = max(0, (max_risk - 40) * 0.6)
+        overall = max(0, base - penalty)
+        
+        # Explicit penalty for uninstalled tools (cannot verify code/dependencies)
+        if not code_scanned or not dependencies_scanned:
+            overall = min(overall, 70)  # Max 30-point penalty for unverified tools
         
         return int(round(overall))
     
@@ -1139,6 +1411,22 @@ class SecurityScanner:
         Returns:
             List of {name, version, type} dictionaries
         """
+        # Security: size limit and file type validation
+        MAX_DEP_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+        try:
+            if not file_path.is_file():
+                logger.warning(f"Not a regular file: {file_path}")
+                return []
+            stat = file_path.stat()
+            if stat.st_size > MAX_DEP_FILE_SIZE:
+                logger.warning(
+                    f"Dependency file too large ({stat.st_size} bytes), skipping: {file_path}"
+                )
+                return []
+        except (OSError, ValueError) as e:
+            logger.warning(f"Cannot validate dependency file: {e}")
+            return []
+        
         deps = []
         
         if dep_type == "npm":
@@ -1169,112 +1457,184 @@ class SecurityScanner:
                         if not line or line.startswith("#") or line.startswith("-"):
                             continue
                         
-                        # Parse name==version, name>=version, name~=version etc.
-                        match = re.match(r"^([a-zA-Z0-9_\-\.]+)\s*([=<>~!]+)\s*(.+)$", line)
-                        if match:
-                            deps.append({
-                                "name": match.group(1),
-                                "version": match.group(3),
-                                "type": "pip",
-                                "source": "requirements.txt",
-                            })
+                        # Use packaging.requirements.Requirement for robust parsing
+                        if Requirement is not None:
+                            try:
+                                req = Requirement(line)
+                                version = str(req.specifier) if req.specifier else "unspecified"
+                                deps.append({
+                                    "name": req.name,
+                                    "version": version,
+                                    "type": "pip",
+                                    "source": "requirements.txt",
+                                })
+                            except Exception as e:
+                                logger.debug(f"Could not parse requirement line: {line}: {e}")
+                                # Fallback: extract name only
+                                clean = line.split(";")[0].split("#")[0].strip()
+                                name = re.split(r'[[\]=<>~!]', clean)[0].strip()
+                                if name and re.match(r'^[a-zA-Z0-9]', name):
+                                    deps.append({
+                                        "name": name,
+                                        "version": "unspecified",
+                                        "type": "pip",
+                                        "source": "requirements.txt",
+                                    })
                         else:
-                            # Name without version
-                            deps.append({
-                                "name": line.split(";")[0].strip(),
-                                "version": "unspecified",
-                                "type": "pip",
-                                "source": "requirements.txt",
-                            })
+                            # Improved regex fallback: strip markers and comments first
+                            clean = line.split(";")[0].split("#")[0].strip()
+                            # Match name[extras] with optional version specifiers
+                            match = re.match(
+                                r'^([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)'
+                                r'(?:\[[^\]]+\])?'
+                                r'\s*([=<>~!]*)'
+                                r'\s*(.*)$',
+                                clean
+                            )
+                            if match:
+                                version = match.group(3).strip() or "unspecified"
+                                deps.append({
+                                    "name": match.group(1),
+                                    "version": version,
+                                    "type": "pip",
+                                    "source": "requirements.txt",
+                                })
+                            else:
+                                name = re.split(r'[[\]=<>~!]', clean)[0].strip()
+                                if name and re.match(r'^[a-zA-Z0-9]', name):
+                                    deps.append({
+                                        "name": name,
+                                        "version": "unspecified",
+                                        "type": "pip",
+                                        "source": "requirements.txt",
+                                    })
             except IOError as e:
                 logger.warning(f"Error parsing requirements.txt: {e}")
         
         elif dep_type == "cargo":
-            # Parse Cargo.toml
+            # Parse Cargo.toml using tomllib/tomli if available
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                # Simple regex-based parsing for [dependencies] section
-                dep_section = re.search(r"\[dependencies\](.*?)(?=\[|$)", content, re.DOTALL)
-                if dep_section:
-                    for line in dep_section.group(1).strip().split("\n"):
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        
-                        # Parse name = "version" or name = { version = "x", ... }
-                        match = re.match(r'^([a-zA-Z0-9_\-]+)\s*=\s*"([^"]+)"', line)
-                        if match:
+                if tomllib is not None:
+                    with open(file_path, "rb") as f:
+                        data = tomllib.load(f)
+                    cargo_deps = data.get("dependencies", {})
+                    if isinstance(cargo_deps, dict):
+                        for name, spec in cargo_deps.items():
+                            if isinstance(spec, str):
+                                version = spec
+                            elif isinstance(spec, dict):
+                                version = spec.get("version", "complex")
+                            else:
+                                version = "complex"
                             deps.append({
-                                "name": match.group(1),
-                                "version": match.group(2),
+                                "name": name,
+                                "version": version,
                                 "type": "cargo",
                                 "source": "Cargo.toml",
                             })
-                        else:
-                            match = re.match(r'^([a-zA-Z0-9_\-]+)\s*=\s*\{', line)
+                else:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    # Safer regex: find [dependencies] section and parse each line
+                    dep_section = re.search(r"\[dependencies\](.*?)(?=\[|$)", content, re.DOTALL)
+                    if dep_section:
+                        for line in dep_section.group(1).strip().split("\n"):
+                            line = line.strip()
+                            if not line or line.startswith("#"):
+                                continue
+                            # Match name = "version" or name = { ... }
+                            match = re.match(
+                                r'^([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)'
+                                r'\s*=\s*'
+                                r'(?:"([^"]+)"|(\{.*\}))',
+                                line
+                            )
                             if match:
+                                name = match.group(1)
+                                version = match.group(2) if match.group(2) else "complex"
                                 deps.append({
-                                    "name": match.group(1),
-                                    "version": "complex",
+                                    "name": name,
+                                    "version": version,
                                     "type": "cargo",
                                     "source": "Cargo.toml",
                                 })
-            except IOError as e:
+            except (IOError, Exception) as e:
                 logger.warning(f"Error parsing Cargo.toml: {e}")
         
         elif dep_type == "go":
-            # Parse go.mod
+            # Parse go.mod with line-by-line state machine
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                # Parse require blocks and single requires
-                require_matches = re.findall(r'require\s+\(?\s*([^)]+)\)?', content, re.DOTALL)
-                for match_text in require_matches:
-                    for line in match_text.strip().split("\n"):
+                    in_require_block = False
+                    for line in f:
                         line = line.strip()
                         if not line or line.startswith("//"):
                             continue
-                        
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            deps.append({
-                                "name": parts[0],
-                                "version": parts[1],
-                                "type": "go",
-                                "source": "go.mod",
-                            })
+                        if line.startswith("require ("):
+                            in_require_block = True
+                            continue
+                        if in_require_block and line == ")":
+                            in_require_block = False
+                            continue
+                        if in_require_block or line.startswith("require "):
+                            req_line = line
+                            if req_line.startswith("require "):
+                                req_line = req_line[len("require "):].strip()
+                            # Remove trailing parentheses if present
+                            req_line = req_line.strip("()")
+                            parts = req_line.split()
+                            if len(parts) >= 2:
+                                deps.append({
+                                    "name": parts[0],
+                                    "version": parts[1],
+                                    "type": "go",
+                                    "source": "go.mod",
+                                })
             except IOError as e:
                 logger.warning(f"Error parsing go.mod: {e}")
         
         elif dep_type == "maven":
-            # Parse pom.xml (simplified)
+            # Parse pom.xml using xml.etree.ElementTree
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                # Find dependencies
-                dep_matches = re.findall(r'<dependency>\s*<groupId>([^<]+)</groupId>\s*<artifactId>([^<]+)</artifactId>\s*(?:<version>([^<]+)</version>)?', content)
-                for group, artifact, version in dep_matches:
-                    deps.append({
-                        "name": f"{group}:{artifact}",
-                        "version": version or "unspecified",
-                        "type": "maven",
-                        "source": "pom.xml",
-                    })
-            except IOError as e:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(file_path)
+                root = tree.getroot()
+                # Find all dependencies regardless of namespace
+                for dep in root.iter():
+                    tag = dep.tag.split("}")[-1] if "}" in dep.tag else dep.tag
+                    if tag == "dependency":
+                        group = None
+                        artifact = None
+                        version = None
+                        for child in dep:
+                            child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                            if child_tag == "groupId":
+                                group = child.text
+                            elif child_tag == "artifactId":
+                                artifact = child.text
+                            elif child_tag == "version":
+                                version = child.text
+                        if group and artifact:
+                            deps.append({
+                                "name": f"{group}:{artifact}",
+                                "version": version or "unspecified",
+                                "type": "maven",
+                                "source": "pom.xml",
+                            })
+            except (IOError, Exception) as e:
                 logger.warning(f"Error parsing pom.xml: {e}")
         
         elif dep_type == "gradle":
-            # Parse build.gradle (simplified)
+            # Parse build.gradle (simplified, regex-based)
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 
-                # Match implementation/compile dependencies
-                dep_matches = re.findall(r"(?:implementation|compile|api)\s+['\"]([^'\"]+)['\"]", content)
+                # Match implementation/compile/api dependencies
+                dep_matches = re.findall(
+                    r"(?:implementation|compile|api)\s+['\"]([^'\"]+)['\"]",
+                    content
+                )
                 for dep_str in dep_matches:
                     parts = dep_str.split(":")
                     if len(parts) >= 2:
@@ -1295,54 +1655,105 @@ class SecurityScanner:
                 logger.warning(f"Error parsing build.gradle: {e}")
         
         elif dep_type == "poetry":
-            # Parse pyproject.toml (Poetry-style)
+            # Parse pyproject.toml using tomllib/tomli if available
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                # Find [tool.poetry.dependencies] section
-                dep_section = re.search(r'\[tool\.poetry\.dependencies\](.*?)(?=\[|$)', content, re.DOTALL)
-                if dep_section:
-                    for line in dep_section.group(1).strip().split("\n"):
-                        line = line.strip()
-                        if not line or line.startswith("#") or line.startswith("python"):
-                            continue
-                        
-                        match = re.match(r'^([a-zA-Z0-9_\-]+)\s*=\s*"([^"]+)"', line)
-                        if match:
+                if tomllib is not None:
+                    with open(file_path, "rb") as f:
+                        data = tomllib.load(f)
+                    poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
+                    if isinstance(poetry_deps, dict):
+                        for name, spec in poetry_deps.items():
+                            if name == "python":
+                                continue
+                            if isinstance(spec, str):
+                                version = spec
+                            elif isinstance(spec, dict):
+                                version = spec.get("version", "complex")
+                            else:
+                                version = "complex"
                             deps.append({
-                                "name": match.group(1),
-                                "version": match.group(2),
+                                "name": name,
+                                "version": version,
                                 "type": "poetry",
                                 "source": "pyproject.toml",
                             })
-            except IOError as e:
-                logger.warning(f"Error parsing pyproject.toml: {e}")
-        
-        elif dep_type == "pipenv":
-            # Parse Pipfile
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                # Find [packages] and [dev-packages] sections
-                for section_name in ["packages", "dev-packages"]:
-                    section = re.search(rf'\[{section_name}\](.*?)(?=\[|$)', content, re.DOTALL)
-                    if section:
-                        for line in section.group(1).strip().split("\n"):
+                else:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    # Safer regex for [tool.poetry.dependencies] section
+                    dep_section = re.search(
+                        r'\[tool\.poetry\.dependencies\](.*?)(?=\[|$)',
+                        content,
+                        re.DOTALL
+                    )
+                    if dep_section:
+                        for line in dep_section.group(1).strip().split("\n"):
                             line = line.strip()
-                            if not line or line.startswith("#"):
+                            if not line or line.startswith("#") or line.startswith("python"):
                                 continue
-                            
-                            match = re.match(r'^([a-zA-Z0-9_\-]+)\s*=\s*"([^"]+)"', line)
+                            match = re.match(
+                                r'^([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)\s*=\s*"([^"]+)"',
+                                line
+                            )
                             if match:
                                 deps.append({
                                     "name": match.group(1),
                                     "version": match.group(2),
-                                    "type": "pipenv",
-                                    "source": "Pipfile",
+                                    "type": "poetry",
+                                    "source": "pyproject.toml",
                                 })
-            except IOError as e:
+            except (IOError, Exception) as e:
+                logger.warning(f"Error parsing pyproject.toml: {e}")
+        
+        elif dep_type == "pipenv":
+            # Parse Pipfile using tomllib/tomli if available
+            try:
+                if tomllib is not None:
+                    with open(file_path, "rb") as f:
+                        data = tomllib.load(f)
+                    for section_name in ["packages", "dev-packages"]:
+                        section_data = data.get(section_name, {})
+                        if not isinstance(section_data, dict):
+                            continue
+                        for name, spec in section_data.items():
+                            if isinstance(spec, str):
+                                version = spec
+                            elif isinstance(spec, dict):
+                                version = spec.get("version", "complex")
+                            else:
+                                version = "complex"
+                            deps.append({
+                                "name": name,
+                                "version": version,
+                                "type": "pipenv",
+                                "source": "Pipfile",
+                            })
+                else:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    for section_name in ["packages", "dev-packages"]:
+                        section = re.search(
+                            rf'\[{section_name}\](.*?)(?=\[|$)',
+                            content,
+                            re.DOTALL
+                        )
+                        if section:
+                            for line in section.group(1).strip().split("\n"):
+                                line = line.strip()
+                                if not line or line.startswith("#"):
+                                    continue
+                                match = re.match(
+                                    r'^([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)\s*=\s*"([^"]+)"',
+                                    line
+                                )
+                                if match:
+                                    deps.append({
+                                        "name": match.group(1),
+                                        "version": match.group(2),
+                                        "type": "pipenv",
+                                        "source": "Pipfile",
+                                    })
+            except (IOError, Exception) as e:
                 logger.warning(f"Error parsing Pipfile: {e}")
         
         elif dep_type == "bundler":
@@ -1354,7 +1765,11 @@ class SecurityScanner:
                         if not line or line.startswith("#"):
                             continue
                         
-                        match = re.match(r'^gem\s+["\']([^"\']+)["\'](?:,\s*["\']([^"\']+)["\'])?', line)
+                        match = re.match(
+                            r'^gem\s+["\']([a-zA-Z0-9][a-zA-Z0-9_\-\.]*)["\']'
+                            r'(?:,\s*["\']([^"\']+)["\'])?',
+                            line
+                        )
                         if match:
                             deps.append({
                                 "name": match.group(1),
@@ -1388,19 +1803,23 @@ class SecurityScanner:
         return deps
     
     def _determine_security_level(self, overall_score: int, code_risk: int, 
-                                   dependency_risk: int) -> SecurityLevel:
+                                   dependency_risk: int, permissions_risk: int = 0) -> SecurityLevel:
         """Determine security level based on score and risk factors.
+        
+        Unified cap logic: any single dimension exceeding its threshold
+        forces a maximum level of MEDIUM (or LOW if score < 70).
         
         Args:
             overall_score: Overall security score (0-100)
             code_risk: Code risk score (0-100)
             dependency_risk: Dependency risk score (0-100)
+            permissions_risk: Permissions risk score (0-100)
             
         Returns:
             SecurityLevel enum value
         """
-        # If any critical risk exists, cap at MEDIUM
-        if code_risk >= 50 or dependency_risk >= 40:
+        # Unified risk cap: any critical dimension triggers downgrade
+        if permissions_risk >= 50 or code_risk >= 50 or dependency_risk >= 40:
             if overall_score >= 70:
                 return SecurityLevel.MEDIUM
             return SecurityLevel.LOW

@@ -4,13 +4,13 @@ import json
 import time
 import sys
 import ast
-import threading
+
 import importlib.util
-import functools
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Set, Union
+from filelock import FileLock
 from dataclasses import dataclass, field, asdict
 from enum import IntEnum
 
@@ -22,20 +22,19 @@ from mcp_hub.registry import Registry, MCPTool
 logger = logging.getLogger(__name__)
 
 # Optional parser libraries — prefer standard/specialized parsers over regex
-# TOML: Python 3.11+ has tomllib; fall back to tomli for 3.9–3.10
-try:
-    import tomllib
-except ImportError:  # pragma: no cover
-    try:
-        import tomli as tomllib
-    except ImportError:  # pragma: no cover
-        tomllib = None
+# packaging: lazy-loaded on first use to avoid import overhead
+_Requirement = None
 
-# packaging: usually available because pip depends on it; guard anyway
-try:
-    from packaging.requirements import Requirement
-except ImportError:  # pragma: no cover
-    Requirement = None
+def _get_requirement_class():
+    """Lazy-load and cache packaging.requirements.Requirement."""
+    global _Requirement
+    if _Requirement is None:
+        try:
+            from packaging.requirements import Requirement
+            _Requirement = Requirement
+        except ImportError:  # pragma: no cover
+            _Requirement = False
+    return _Requirement
 
 
 class SecurityLevel(IntEnum):
@@ -45,6 +44,7 @@ class SecurityLevel(IntEnum):
     MEDIUM = 2   # 静态分析通过，无高危漏洞
     HIGH = 3     # 代码审计通过，权限合理
     VERIFIED = 4 # 官方验证，签名完整
+    CRITICAL = 5 # 显式高危，触发 Tier 1 封顶
 
 
 @dataclass
@@ -66,15 +66,17 @@ class SecurityReport:
     recommendations: List[str] = field(default_factory=list)
     
     # Metadata
+    status: str = "scanned"
     scanned_at: str = field(default_factory=lambda: datetime.now().isoformat())
     scan_duration: float = 0.0
     scanner_version: str = "0.1.0"
     
-    def to_dict(self) -> Dict:
-        return {
+    def to_dict(self, exclude_none: bool = False) -> Dict:
+        d = {
             "tool_name": self.tool_name,
             "overall_score": self.overall_score,
             "security_level": self.security_level.name,
+            "status": self.status,
             "permissions_analysis": self.permissions_analysis,
             "code_analysis": self.code_analysis,
             "dependency_analysis": self.dependency_analysis,
@@ -86,6 +88,12 @@ class SecurityReport:
             "scan_duration": self.scan_duration,
             "scanner_version": self.scanner_version,
         }
+        if exclude_none:
+            d = {k: v for k, v in d.items() if v is not None}
+        return d
+
+    def to_json(self, exclude_none: bool = True) -> str:
+        return json.dumps(self.to_dict(exclude_none=exclude_none), ensure_ascii=False, indent=2)
 
 
 class SecurityScanner:
@@ -286,8 +294,8 @@ class SecurityScanner:
     MAX_LINES_PER_FILE = 50000        # limit lines processed per file
     RE_TIMEOUT = 5.0                  # 5 seconds regex match timeout (Python 3.11+)
 
-    # Concurrent scan limit
-    _scan_semaphore = threading.Semaphore(2)
+    # Concurrent scan limit (file-based cross-process lock)
+    _scan_lock_file: Optional[str] = None
     
     # Code file extensions to scan
     CODE_EXTENSIONS = {
@@ -422,7 +430,27 @@ class SecurityScanner:
             return self._create_error_report(tool_name, f"Tool '{tool_name}' not found in registry")
         
         install_path = self._get_install_path(tool)
-        
+
+        # Short-circuit only when directory exists but is empty
+        if install_path and os.path.isdir(install_path):
+            try:
+                entries = os.listdir(install_path)
+            except OSError:
+                entries = []
+            if not entries:
+                return SecurityReport(
+                    tool_name=tool_name,
+                    overall_score=0,
+                    security_level=SecurityLevel.UNKNOWN,
+                    status="not_installed",
+                    permissions_analysis={},
+                    code_analysis={},
+                    dependency_analysis={},
+                    network_analysis={},
+                    warnings=[f"Tool '{tool_name}' installation directory is empty."],
+                    recommendations=["Reinstall the tool before scanning."],
+                )
+
         # Step 2: Analyze permissions
         permissions_analysis = self._analyze_permissions(tool)
         permissions_risk = permissions_analysis.get("total_risk_score", 0)
@@ -447,9 +475,13 @@ class SecurityScanner:
             code_scanned=code_scanned, dependencies_scanned=dependencies_scanned
         )
         
-        # Determine security level
+        # Determine security level (pass critical flags for Tier 1 cap)
+        has_critical_code = code_analysis.get("has_critical_code", False)
+        has_critical_dependency = dependency_analysis.get("has_critical_dependency", False)
         security_level = self._determine_security_level(
-            overall_score, code_risk, dependency_risk, permissions_risk
+            overall_score, code_risk, dependency_risk, permissions_risk,
+            has_critical_code=has_critical_code,
+            has_critical_dependency=has_critical_dependency,
         )
         
         # Step 7: Create report
@@ -479,10 +511,14 @@ class SecurityScanner:
         
         return report
     
+    # LRU cache for scan results (max 50 entries)
+    _scan_cache: Dict[str, SecurityReport] = {}
+    _scan_cache_max_size: int = 50
+
     def quick_scan(self, tool_name: str) -> SecurityReport:
         """Quick security scan without detailed analysis.
 
-        This is a lightweight scan that skips code snippet collection
+        This is a lightweight scan that skips source-code AST parsing
         and detailed dependency analysis. Suitable for batch operations.
 
         Args:
@@ -491,16 +527,34 @@ class SecurityScanner:
         Returns:
             SecurityReport with analysis results
         """
+        # Check cache first
+        if tool_name in self._scan_cache:
+            return self._scan_cache[tool_name]
+
         report = self.scan(tool_name, detailed=False)
+        # Cache the result
+        if len(self._scan_cache) >= self._scan_cache_max_size:
+            # Simple eviction: clear half the cache
+            keys = list(self._scan_cache.keys())
+            for k in keys[:len(keys)//2]:
+                del self._scan_cache[k]
+        self._scan_cache[tool_name] = report
         return report
+
+    def invalidate_cache(self, tool_name: str) -> None:
+        """Invalidate cached scan result for a tool."""
+        self._scan_cache.pop(tool_name, None)
 
     def quick_scan_score(self, tool_name: str) -> int:
         """Quick security score (0-100) without detailed analysis.
 
         Returns:
-            Integer score from 0 (high risk) to 100 (low risk)
+            Integer score from 0 (high risk) to 100 (low risk),
+            or -1 if the tool is not installed.
         """
         report = self.scan(tool_name, detailed=False)
+        if report.status == "not_installed":
+            return -1
         return report.overall_score
     
     def compare_tools(self, tool_names: List[str]) -> Dict[str, SecurityReport]:
@@ -688,7 +742,7 @@ class SecurityScanner:
         # Network recommendations
         network = report.network_analysis
         if network.get("has_network_access", False):
-            if network.get("risk_level") == "high":
+            if network.get("risk_level") == "HIGH":
                 recommendations.append(
                     "[NETWORK] 工具具有不受限制的网络访问权限。"
                     "建议实施网络访问控制，使用代理或防火墙限制出站连接。"
@@ -815,13 +869,13 @@ class SecurityScanner:
         
         # Classify overall permission risk using RISK_THRESHOLD_* constants
         if total_risk >= self.RISK_THRESHOLD_HIGH:
-            result["risk_level"] = "critical"
+            result["risk_level"] = "CRITICAL"
         elif total_risk >= self.RISK_THRESHOLD_MEDIUM:
-            result["risk_level"] = "high"
+            result["risk_level"] = "HIGH"
         elif total_risk >= self.RISK_THRESHOLD_LOW:
-            result["risk_level"] = "medium"
+            result["risk_level"] = "MEDIUM"
         else:
-            result["risk_level"] = "low"
+            result["risk_level"] = "LOW"
         
         return result
     
@@ -888,7 +942,11 @@ class SecurityScanner:
         
         start_time = time.time()
         
-        with self._scan_semaphore:
+        # Cross-process scan lock
+        lock_path = Path(DEFAULT_DATA_DIR) / ".scan.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(lock_path))
+        with lock:
             for path in install_path.rglob("*"):
                 total_paths_enumerated += 1
                 
@@ -970,8 +1028,13 @@ class SecurityScanner:
                             source = f.read(self.MAX_FILE_SIZE + 1)
                         if len(source) > self.MAX_FILE_SIZE:
                             continue
-                        excluded_lines = self._get_python_excluded_lines(source)
-                        string_spans = self._get_python_string_spans(source)
+                        # Skip AST string-span detection for files > 1MB to reduce memory
+                        if len(source) > 1024 * 1024:
+                            excluded_lines = self._get_python_excluded_lines(source)
+                            string_spans = {}
+                        else:
+                            excluded_lines = self._get_python_excluded_lines(source)
+                            string_spans = self._get_python_string_spans(source)
                         line_iter = enumerate(source.splitlines(keepends=True), 1)
                     else:
                         f = open(path, "r", encoding="utf-8", errors="ignore")
@@ -1035,20 +1098,23 @@ class SecurityScanner:
         
         # Calculate skipped files based on enumerated paths
         files_skipped = total_paths_enumerated - files_scanned
-        
+
         # Calculate total risk score
         total_risk = 0
         for pattern_type, count in result["pattern_counts"].items():
             weight = risk_weights.get(pattern_type, 1)
             total_risk += count * weight
-        
+
+        # Mark if critical code patterns (command_execution) were detected
+        result["has_critical_code"] = result["pattern_counts"].get("command_execution", 0) > 0
+
         # Cap at 100
         result["total_risk_score"] = min(total_risk, 100)
         result["files_scanned"] = files_scanned
         result["files_skipped"] = files_skipped
         result["total_lines"] = total_lines
         result["status"] = "completed"
-        
+
         return result
     
     def _check_dependencies(self, tool: MCPTool, install_path: Optional[str]) -> Dict[str, Any]:
@@ -1161,6 +1227,12 @@ class SecurityScanner:
             total_risk += 5
             result["note"] = "依赖数量过多，增加攻击面"
         
+        # Mark if eval-like critical dependencies were detected
+        result["has_critical_dependency"] = any(
+            d.get("name", "").lower() in ("eval", "exec", "unsafe-eval", "vm2", "sandbox")
+            for d in risky
+        )
+
         result["dependencies"] = all_deps
         result["total_risk"] = min(total_risk, 100)
         result["risky_dependencies"] = risky
@@ -1168,7 +1240,7 @@ class SecurityScanner:
         result["dependency_files_found"] = dep_files_found
         result["dependency_count"] = len(all_deps)
         result["status"] = "completed"
-        
+
         return result
     
     def _analyze_network_access(self, tool: MCPTool) -> Dict[str, Any]:
@@ -1184,14 +1256,14 @@ class SecurityScanner:
             Dictionary with:
             - has_network_access: bool
             - endpoints: list of endpoint strings
-            - risk_level: str (low/medium/high)
+            - risk_level: str (LOW/MEDIUM/HIGH/CRITICAL)
             - risk_score: int
             - declared_in_permissions: bool
         """
         result = {
             "has_network_access": False,
             "endpoints": [],
-            "risk_level": "low",
+            "risk_level": "LOW",
             "risk_score": 0,
             "declared_in_permissions": False,
         }
@@ -1241,7 +1313,7 @@ class SecurityScanner:
         
         # Calculate risk
         risk_score = 0
-        risk_level = "low"
+        risk_level = "LOW"
         
         if has_network_perm or endpoints:
             result["has_network_access"] = True
@@ -1274,9 +1346,9 @@ class SecurityScanner:
             pass
         
         if risk_score >= 20:
-            risk_level = "high"
+            risk_level = "HIGH"
         elif risk_score >= 10:
-            risk_level = "medium"
+            risk_level = "MEDIUM"
         
         result["endpoints"] = endpoints
         result["risk_level"] = risk_level
@@ -1284,17 +1356,16 @@ class SecurityScanner:
         
         return result
     
-    def _calculate_score(self, permissions_risk: int, code_risk: int, 
+    def _calculate_score(self, permissions_risk: int, code_risk: int,
                          dependency_risk: int, network_risk: int,
                          code_scanned: bool = True,
                          dependencies_scanned: bool = True) -> int:
         """Calculate overall security score (0-100, higher is better).
-        
-        Uses non-linear scoring with max-risk penalty:
-        - Base score from weighted dimensions
-        - Penalty applied based on maximum single-dimension risk
-        - Uninstalled tools receive explicit penalty
-        
+
+        Uses non-linear scoring with per-dimension hard caps and
+        max-risk penalty to prevent a single high-risk dimension
+        from being diluted by low-risk dimensions.
+
         Args:
             permissions_risk: Risk score from permission analysis (0-100)
             code_risk: Risk score from code analysis (0-100)
@@ -1302,7 +1373,7 @@ class SecurityScanner:
             network_risk: Risk score from network analysis (0-100)
             code_scanned: Whether source code was successfully scanned
             dependencies_scanned: Whether dependencies were successfully scanned
-            
+
         Returns:
             Integer score from 0 to 100
         """
@@ -1311,7 +1382,7 @@ class SecurityScanner:
         code_score = max(0, 100 - code_risk)
         dep_score = max(0, 100 - dependency_risk)
         net_score = max(0, 100 - network_risk)
-        
+
         # Base weighted average
         base = (
             perm_score * self.WEIGHT_PERMISSIONS +
@@ -1319,16 +1390,39 @@ class SecurityScanner:
             dep_score * self.WEIGHT_DEPENDENCIES +
             net_score * self.WEIGHT_NETWORK
         )
-        
-        # Non-linear penalty: max single-dimension risk above 40 triggers extra penalty
+
+        # Per-dimension hard caps (prevent dilution)
+        def _dim_cap(risk: int) -> int:
+            if risk >= 60:
+                return 40
+            elif risk >= 40:
+                return 60
+            elif risk >= 20:
+                return 80
+            return 100
+
+        hard_cap = min(
+            _dim_cap(permissions_risk),
+            _dim_cap(code_risk),
+            _dim_cap(dependency_risk),
+            _dim_cap(network_risk),
+        )
+        base = min(base, hard_cap)
+
+        # Non-linear penalty based on max single-dimension risk.
+        # Continuous at max_risk=40 (penalty=0) and grows quadratically
+        # to +32 at max_risk=60 (replacing the old +30 discontinuity).
         max_risk = max(permissions_risk, code_risk, dependency_risk, network_risk)
-        penalty = max(0, (max_risk - 40) * 0.6)
-        overall = max(0, base - penalty)
-        
+        if max_risk <= 40:
+            penalty = 0.0
+        else:
+            penalty = ((max_risk - 40) ** 2) / 12.5
+        overall = max(0.0, base - penalty)
+
         # Explicit penalty for uninstalled tools (cannot verify code/dependencies)
         if not code_scanned or not dependencies_scanned:
-            overall = min(overall, 70)  # Max 30-point penalty for unverified tools
-        
+            overall = min(overall, 70)
+
         return int(round(overall))
     
     def _check_required_permissions(self, tool: MCPTool) -> List[str]:
@@ -1395,7 +1489,7 @@ class SecurityScanner:
         
         # Try DEFAULT_DATA_DIR
         data_dir = Path(DEFAULT_DATA_DIR) if DEFAULT_DATA_DIR else Path.home() / ".mcp-hub"
-        candidate = data_dir / "tools" / getattr(tool, "name", "")
+        candidate = data_dir / "installed" / getattr(tool, "name", "")
         if candidate.exists():
             return str(candidate)
         
@@ -1403,14 +1497,23 @@ class SecurityScanner:
     
     def _parse_dependency_file(self, file_path: Path, dep_type: str) -> List[Dict[str, str]]:
         """Parse a dependency file and return list of dependencies.
-        
+
         Args:
             file_path: Path to the dependency file
             dep_type: Type of dependency file (npm, pip, cargo, etc.)
-            
+
         Returns:
             List of {name, version, type} dictionaries
         """
+        # Lazy-load tomllib/tomli inside this method
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover
+            try:
+                import tomli as tomllib
+            except ImportError:  # pragma: no cover
+                tomllib = None
+
         # Security: size limit and file type validation
         MAX_DEP_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
         try:
@@ -1458,7 +1561,8 @@ class SecurityScanner:
                             continue
                         
                         # Use packaging.requirements.Requirement for robust parsing
-                        if Requirement is not None:
+                        Requirement = _get_requirement_class()
+                        if Requirement:
                             try:
                                 req = Requirement(line)
                                 version = str(req.specifier) if req.specifier else "unspecified"
@@ -1802,28 +1906,54 @@ class SecurityScanner:
         
         return deps
     
-    def _determine_security_level(self, overall_score: int, code_risk: int, 
-                                   dependency_risk: int, permissions_risk: int = 0) -> SecurityLevel:
-        """Determine security level based on score and risk factors.
-        
-        Unified cap logic: any single dimension exceeding its threshold
-        forces a maximum level of MEDIUM (or LOW if score < 70).
-        
+    def _determine_security_level(
+        self,
+        overall_score: int,
+        code_risk: int,
+        dependency_risk: int,
+        permissions_risk: int = 0,
+        has_critical_code: bool = False,
+        has_critical_dependency: bool = False,
+    ) -> SecurityLevel:
+        """Determine security level with four-tier cap logic.
+
+        Tier 1: Explicit high-risk patterns (command_execution, eval-like deps)
+                → hard cap at MEDIUM.
+        Tier 2: Extreme single-dimension risk (permissions>=50, code>=50,
+                dependency>=40) → cap at MEDIUM/LOW.
+        Tier 3: Moderate-high single-dimension risk → cap at HIGH/MEDIUM.
+        Tier 4: Score-based分级 (including CRITICAL for very low scores).
+
         Args:
             overall_score: Overall security score (0-100)
             code_risk: Code risk score (0-100)
             dependency_risk: Dependency risk score (0-100)
             permissions_risk: Permissions risk score (0-100)
-            
+            has_critical_code: True if command_execution patterns detected
+            has_critical_dependency: True if eval-like dependencies detected
+
         Returns:
             SecurityLevel enum value
         """
-        # Unified risk cap: any critical dimension triggers downgrade
+        # Tier 1: Explicit high-risk patterns
+        if has_critical_code or has_critical_dependency:
+            return SecurityLevel.MEDIUM
+
+        # Tier 2: Extreme single-dimension risk
         if permissions_risk >= 50 or code_risk >= 50 or dependency_risk >= 40:
             if overall_score >= 70:
                 return SecurityLevel.MEDIUM
             return SecurityLevel.LOW
-        
+
+        # Tier 3: Moderate-high single-dimension risk
+        if permissions_risk >= 30 or code_risk >= 30 or dependency_risk >= 25:
+            if overall_score >= 80:
+                return SecurityLevel.HIGH
+            elif overall_score >= 50:
+                return SecurityLevel.MEDIUM
+            return SecurityLevel.LOW
+
+        # Tier 4: Score-based分级
         if overall_score >= 90:
             return SecurityLevel.VERIFIED
         elif overall_score >= 75:
@@ -1832,8 +1962,10 @@ class SecurityScanner:
             return SecurityLevel.MEDIUM
         elif overall_score >= 20:
             return SecurityLevel.LOW
-        
-        return SecurityLevel.UNKNOWN
+        elif overall_score >= 0:
+            return SecurityLevel.UNKNOWN
+
+        return SecurityLevel.CRITICAL
     
     def _collect_findings(self, report: SecurityReport, 
                           permissions_analysis: Dict[str, Any],
@@ -1887,8 +2019,8 @@ class SecurityScanner:
         
         # Network warnings
         if network_analysis.get("has_network_access", False):
-            risk_level = network_analysis.get("risk_level", "low")
-            if risk_level == "high":
+            risk_level = network_analysis.get("risk_level", "LOW")
+            if risk_level == "HIGH":
                 errors.append("工具具有不受限制的高风险网络访问权限")
             elif risk_level == "medium":
                 warnings.append("工具具有中等风险的网络访问配置")
@@ -1909,11 +2041,11 @@ class SecurityScanner:
     
     def _create_error_report(self, tool_name: str, error_message: str) -> SecurityReport:
         """Create a minimal error report when scanning fails.
-        
+
         Args:
             tool_name: Name of the tool that failed
             error_message: Error description
-            
+
         Returns:
             SecurityReport with error status
         """
@@ -1921,6 +2053,7 @@ class SecurityScanner:
             tool_name=tool_name,
             overall_score=0,
             security_level=SecurityLevel.UNKNOWN,
+            status="error",
             errors=[error_message],
             recommendations=[
                 f"无法完成扫描: {error_message}",
