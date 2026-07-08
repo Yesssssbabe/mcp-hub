@@ -3,14 +3,36 @@
 import copy
 import json
 import os
+import tempfile
+from pathlib import Path
 
 # Allow tests to use temporary paths outside ~/.config/mcp-hub.
 os.environ.setdefault("MCP_HUB_TEST_MODE", "1")
+os.environ.setdefault(
+    "MCP_HUB_CONFIG_DIR",
+    str(Path(tempfile.gettempdir()) / f"mcp-hub-tests-{os.getpid()}"),
+)
 
 import pytest
 
 from mcp_hub.registry import MCPTool, Registry
 from mcp_hub.config import ConfigManager, MCPConfig, ClientConfig
+from mcp_hub.constants import SUPPORTED_CLIENTS
+
+
+@pytest.fixture(autouse=True)
+def isolate_client_config_paths(tmp_path, monkeypatch):
+    """Keep tests from writing real client config files under the user's home."""
+
+    def fake_get_client_config_path(self, client_name):
+        if client_name not in SUPPORTED_CLIENTS:
+            return None
+        return str(tmp_path / f"{client_name}_config.json")
+
+    monkeypatch.setattr(
+        ConfigManager, "get_client_config_path", fake_get_client_config_path
+    )
+    monkeypatch.setattr("mcp_hub.config._get_home_dir", lambda: tmp_path)
 
 
 def make_minimal_tool(**kwargs):

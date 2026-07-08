@@ -1,5 +1,6 @@
 """Tests for mcp_hub.constants module."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,18 @@ from mcp_hub.constants import (
     SUPPORTED_CLIENTS,
 )
 from mcp_hub.security import SecurityLevel
+
+
+def _expected_data_dir() -> Path:
+    env_dir = os.environ.get("MCP_HUB_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+
+    expected_base = Path.home() / ".config" / "mcp-hub"
+    legacy_base = Path.home() / ".mcp-hub"
+    if legacy_base.exists() and not expected_base.exists():
+        expected_base = legacy_base
+    return expected_base
 
 
 class TestExceptionHierarchy:
@@ -58,27 +71,17 @@ class TestConstants:
 
     def test_default_registry_path(self):
         assert isinstance(DEFAULT_REGISTRY_PATH, Path)
-        expected_base = Path.home() / ".config" / "mcp-hub"
-        legacy_base = Path.home() / ".mcp-hub"
-        if legacy_base.exists() and not expected_base.exists():
-            expected_base = legacy_base
+        expected_base = _expected_data_dir()
         assert str(DEFAULT_REGISTRY_PATH) == str(expected_base / "registry.json")
 
     def test_default_config_path(self):
         assert isinstance(DEFAULT_CONFIG_PATH, Path)
-        expected_base = Path.home() / ".config" / "mcp-hub"
-        legacy_base = Path.home() / ".mcp-hub"
-        if legacy_base.exists() and not expected_base.exists():
-            expected_base = legacy_base
+        expected_base = _expected_data_dir()
         assert str(DEFAULT_CONFIG_PATH) == str(expected_base / "config.json")
 
     def test_default_data_dir(self):
         assert isinstance(DEFAULT_DATA_DIR, Path)
-        expected_base = Path.home() / ".config" / "mcp-hub"
-        legacy_base = Path.home() / ".mcp-hub"
-        if legacy_base.exists() and not expected_base.exists():
-            expected_base = legacy_base
-        assert str(DEFAULT_DATA_DIR) == str(expected_base)
+        assert str(DEFAULT_DATA_DIR) == str(_expected_data_dir())
 
     def test_supported_clients_is_tuple(self):
         assert isinstance(SUPPORTED_CLIENTS, tuple)

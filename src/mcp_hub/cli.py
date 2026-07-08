@@ -360,6 +360,7 @@ def _validate_name(name: str) -> str:
 
 # Command whitelist (FIX-08) — defensive; config.py has the canonical list
 _ALLOWED_COMMANDS = {"npx", "npm", "uvx", "node", "python", "python3", "docker", "uv"}
+_ALLOWED_PYTHON_COMMAND = re.compile(r"^python3(?:\.\d+)*$")
 
 
 def _validate_command(cmd: str) -> str:
@@ -385,7 +386,10 @@ def _validate_command(cmd: str) -> str:
         raise MCPHubError("Command not found or not executable.")
     # Defensive whitelist check on basename
     cmd_name = os.path.basename(abs_cmd)
-    if cmd_name not in _ALLOWED_COMMANDS:
+    if (
+        cmd_name not in _ALLOWED_COMMANDS
+        and not _ALLOWED_PYTHON_COMMAND.fullmatch(cmd_name)
+    ):
         raise MCPHubError(f"Command '{cmd_name}' is not in the allowed list.")
     return abs_cmd
 
