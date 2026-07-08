@@ -1,7 +1,7 @@
 """Environment variable security — whitelist-based filtering for subprocess isolation."""
 
 import os
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 import logging
 
 logger = logging.getLogger("mcp_hub.env_security")
@@ -40,8 +40,8 @@ METHOD_SPECIFIC_VARS: Dict[str, List[str]] = {
     "npm": [
         # npm 配置（不含认证 Token）
         "npm_config_",
-        "NODE_OPTIONS",
         "NODE_NO_WARNINGS",
+        # 禁止传递: NODE_OPTIONS（可通过 --require 注入代码）
         # 禁止传递: NPM_TOKEN, NODE_AUTH_TOKEN, etc.
     ],
     "pip": [

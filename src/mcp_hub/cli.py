@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
@@ -12,10 +11,10 @@ from typing import List, Optional, Dict, Any, Union
 import typer
 from typing_extensions import Annotated
 
-from mcp_hub.config import ClientConfig, ConfigManager, MCPConfig, _validate_env
+from mcp_hub.config import ConfigManager, MCPConfig, _validate_env
 from mcp_hub.constants import DEFAULT_DATA_DIR, INSTALL_TYPES, MCPHubError, SUPPORTED_CLIENTS
 from mcp_hub.installer import Installer
-from mcp_hub.registry import MCPTool, Registry, load_builtin_registry
+from mcp_hub.registry import Registry, load_builtin_registry
 from mcp_hub.security import SecurityScanner, SecurityLevel
 from mcp_hub.utils import Logger
 from rich.console import Console
@@ -29,7 +28,7 @@ app = typer.Typer(
     help="MCP Hub - Discover, install, and manage MCP tools",
     epilog="Documentation: https://github.com/your-org/mcp-hub#readme",
     invoke_without_command=True,
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=True,
 )
 console = Logger("CLI")
@@ -254,11 +253,11 @@ def _handle_cli_error(cmd_name: str, exc: Exception) -> None:
     """Classify exceptions and emit sanitized, user-friendly messages."""
     msg = str(exc).lower()
     if any(c in msg for c in CATEGORY_CORRUPTED):
-        console.error(f"Data file is corrupted. Try running 'mcp-hub init --force' to reset.")
+        console.error("Data file is corrupted. Try running 'mcp-hub init --force' to reset.")
     elif any(c in msg for c in CATEGORY_PERMISSION):
-        console.error(f"Permission denied. Check file/directory access rights.")
+        console.error("Permission denied. Check file/directory access rights.")
     elif any(c in msg for c in CATEGORY_MISSING):
-        console.error(f"Required file or directory not found.")
+        console.error("Required file or directory not found.")
     elif isinstance(exc, SecurityError):
         console.error(f"Security check failed: {exc}")
     elif isinstance(exc, MCPHubError):
@@ -460,6 +459,7 @@ _VALID_ACTIONS = ["add", "remove", "list", "show", "generate", "detect", "auto",
 
 @app.callback()
 def _main_callback(
+    ctx: typer.Context,
     version: Annotated[
         bool,
         typer.Option(
@@ -473,6 +473,9 @@ def _main_callback(
     """MCP Hub CLI."""
     if version:
         typer.echo("mcp-hub 0.1.0")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
         raise typer.Exit()
 
 

@@ -2,21 +2,18 @@ import os
 import re
 import json
 import time
-import sys
 import ast
 
 import importlib.util
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Set, Union
+from typing import Dict, List, Optional, Any, Tuple, Set
 from filelock import FileLock
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import IntEnum
 
-from mcp_hub.constants import (
-    SecurityError, SECURITY_LEVELS, DEFAULT_DATA_DIR
-)
+from mcp_hub.constants import DEFAULT_DATA_DIR
 from mcp_hub.registry import Registry, MCPTool
 
 logger = logging.getLogger(__name__)
@@ -310,33 +307,26 @@ class SecurityScanner:
         self.registry = registry if registry is not None else Registry()
         self._prerequisites_cache: Optional[Dict[str, bool]] = None
         self._pattern_cache: Dict[Tuple[str, int], re.Pattern] = {}
+        self._scan_cache: Dict[Tuple[str, str, str, str], SecurityReport] = {}
     
     # ──────────────────────────────────────────────────────────────
     #  Regex Safety Utilities
     # ──────────────────────────────────────────────────────────────
 
     def _compile_pattern(self, pattern: str, flags: int = 0) -> re.Pattern:
-        """Compile and cache regex pattern with optional Python 3.11+ timeout."""
+        """Compile and cache regex pattern.
+
+        The stdlib ``re`` module does not support per-pattern timeouts. Scan
+        safety is enforced with line/file/time limits around the regex calls.
+        """
         key = (pattern, flags)
         if key not in self._pattern_cache:
-            if sys.version_info >= (3, 11):
-                self._pattern_cache[key] = re.compile(pattern, flags, timeout=self.RE_TIMEOUT)
-            else:
-                self._pattern_cache[key] = re.compile(pattern, flags)
+            self._pattern_cache[key] = re.compile(pattern, flags)
         return self._pattern_cache[key]
 
     def _safe_search(self, compiled: re.Pattern, text: str) -> Optional[re.Match]:
-        """Search with timeout protection, logging on regex timeout."""
-        _timeout_err = getattr(re, "TimeoutError", None)
-        try:
-            if sys.version_info >= (3, 11):
-                return compiled.search(text, timeout=self.RE_TIMEOUT)
-            return compiled.search(text)
-        except Exception as e:
-            if _timeout_err is not None and isinstance(e, _timeout_err):
-                logger.warning(f"Regex timeout for pattern: {compiled.pattern[:50]}...")
-                return None
-            raise
+        """Search a bounded line of text with a precompiled pattern."""
+        return compiled.search(text)
 
     def _get_python_excluded_lines(self, source: str) -> Set[int]:
         """Return line numbers that belong to __main__ blocks or multiline strings.
@@ -511,9 +501,20 @@ class SecurityScanner:
         
         return report
     
-    # LRU cache for scan results (max 50 entries)
-    _scan_cache: Dict[str, SecurityReport] = {}
+    # Per-instance LRU cache for scan results (max 50 entries)
     _scan_cache_max_size: int = 50
+
+    def _make_scan_cache_key(self, tool_name: str) -> Tuple[str, str, str, str]:
+        """Build a cache key that is scoped to this scanner and tool state."""
+        tool = self._get_tool(tool_name)
+        if tool is None:
+            return (str(id(self.registry)), tool_name, "missing", "")
+        return (
+            str(id(self.registry)),
+            tool_name,
+            str(getattr(tool, "updated_at", "")),
+            str(getattr(tool, "install_path", "")),
+        )
 
     def quick_scan(self, tool_name: str) -> SecurityReport:
         """Quick security scan without detailed analysis.
@@ -528,8 +529,9 @@ class SecurityScanner:
             SecurityReport with analysis results
         """
         # Check cache first
-        if tool_name in self._scan_cache:
-            return self._scan_cache[tool_name]
+        cache_key = self._make_scan_cache_key(tool_name)
+        if cache_key in self._scan_cache:
+            return self._scan_cache[cache_key]
 
         report = self.scan(tool_name, detailed=False)
         # Cache the result
@@ -538,12 +540,14 @@ class SecurityScanner:
             keys = list(self._scan_cache.keys())
             for k in keys[:len(keys)//2]:
                 del self._scan_cache[k]
-        self._scan_cache[tool_name] = report
+        self._scan_cache[cache_key] = report
         return report
 
     def invalidate_cache(self, tool_name: str) -> None:
         """Invalidate cached scan result for a tool."""
-        self._scan_cache.pop(tool_name, None)
+        for cache_key in list(self._scan_cache.keys()):
+            if cache_key[1] == tool_name:
+                del self._scan_cache[cache_key]
 
     def quick_scan_score(self, tool_name: str) -> int:
         """Quick security score (0-100) without detailed analysis.
@@ -1160,13 +1164,15 @@ class SecurityScanner:
             if dep_file_path.exists():
                 # Security: path traversal and symlink validation
                 try:
+                    if dep_file_path.is_symlink():
+                        logger.warning(f"Skipping symlink dependency file: {dep_file_path}")
+                        continue
                     resolved = dep_file_path.resolve()
                     install_resolved = install_path.resolve()
-                    if not str(resolved).startswith(str(install_resolved)):
+                    try:
+                        resolved.relative_to(install_resolved)
+                    except ValueError:
                         logger.warning(f"Path traversal detected: {dep_file_path}")
-                        continue
-                    if resolved.is_symlink():
-                        logger.warning(f"Skipping symlink dependency file: {dep_file_path}")
                         continue
                     if not resolved.is_file():
                         logger.warning(f"Skipping non-file dependency path: {dep_file_path}")
@@ -1185,8 +1191,18 @@ class SecurityScanner:
         lock_files = ["package-lock.json", "Pipfile.lock", "Cargo.lock", "go.sum", "poetry.lock"]
         for lock_file in lock_files:
             lock_path = install_path / lock_file
-            if lock_path.exists():
-                dep_files_found.append(lock_file)
+            if not lock_path.exists():
+                continue
+            try:
+                if lock_path.is_symlink():
+                    logger.warning(f"Skipping symlink lock file: {lock_path}")
+                    continue
+                resolved = lock_path.resolve()
+                resolved.relative_to(install_path.resolve())
+                if resolved.is_file():
+                    dep_files_found.append(lock_file)
+            except (OSError, ValueError) as e:
+                logger.warning(f"Path validation error for {lock_path}: {e}")
         
         # Analyze each dependency
         for dep in all_deps:

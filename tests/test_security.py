@@ -1,9 +1,5 @@
 """Tests for mcp_hub.security module."""
 
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 from mcp_hub.registry import MCPTool, Registry
 from mcp_hub.security import SecurityScanner, SecurityReport, SecurityLevel
 
@@ -153,6 +149,27 @@ class TestSecurityScannerCheckPrerequisites:
         assert p1 == p2
 
 
+class TestSecurityScannerCacheSafety:
+    """Security scanner cache isolation tests."""
+
+    def test_compile_pattern_uses_stdlib_re_without_timeout_api(self, tmp_path):
+        scanner = SecurityScanner(Registry(registry_path=str(tmp_path / "reg.json")))
+        compiled = scanner._compile_pattern(r"os\.system")
+        assert compiled.search("os.system('ls')")
+
+    def test_quick_scan_cache_is_scoped_to_registry(self, tmp_path):
+        registry_safe = Registry(registry_path=str(tmp_path / "safe.json"))
+        registry_safe.add(make_tool(name="same-name", permissions=[]))
+        safe_report = SecurityScanner(registry=registry_safe).quick_scan("same-name")
+
+        registry_dangerous = Registry(registry_path=str(tmp_path / "dangerous.json"))
+        registry_dangerous.add(make_tool(name="same-name", permissions=["command:shell"]))
+        dangerous_report = SecurityScanner(registry=registry_dangerous).quick_scan("same-name")
+
+        assert safe_report.permissions_analysis["high_risk_permissions"] == []
+        assert dangerous_report.permissions_analysis["high_risk_permissions"] == ["command:shell"]
+
+
 class TestSecurityScannerRecommendations:
     """Test generate_recommendations."""
 
@@ -247,6 +264,23 @@ class TestSecurityScannerInternal:
         scanner = SecurityScanner(registry=registry)
         result = scanner._check_dependencies(registry.get("no-deps"), None)
         assert result["status"] == "not_installed"
+
+    def test_check_dependencies_skips_symlinked_dependency_file(self, tmp_path):
+        registry = Registry(registry_path=str(tmp_path / "reg.json"))
+        registry.add(make_tool(name="deps"))
+        scanner = SecurityScanner(registry=registry)
+        install_dir = tmp_path / "installed"
+        outside_dir = tmp_path / "outside"
+        install_dir.mkdir()
+        outside_dir.mkdir()
+        outside_pyproject = outside_dir / "pyproject.toml"
+        outside_pyproject.write_text('[tool.poetry.dependencies]\nunsafe-eval = "1.0.0"\n')
+        (install_dir / "pyproject.toml").symlink_to(outside_pyproject)
+
+        result = scanner._check_dependencies(registry.get("deps"), str(install_dir))
+
+        assert result["status"] == "completed"
+        assert result["dependency_count"] == 0
 
     def test_calculate_score(self, tmp_path):
         scanner = SecurityScanner(Registry(registry_path=str(tmp_path / "reg.json")))

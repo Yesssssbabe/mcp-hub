@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import logging
 import os
 import platform
@@ -20,14 +19,13 @@ import ssl
 import stat
 import subprocess
 import tarfile
-import tempfile
 import time
 import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from mcp_hub.constants import (
@@ -35,6 +33,7 @@ from mcp_hub.constants import (
     INSTALL_TYPES,
     InstallationError,
 )
+from mcp_hub.env_security import EnvWhitelistManager
 from mcp_hub.registry import MCPTool, Registry
 
 logger = logging.getLogger(__name__)
@@ -67,6 +66,8 @@ class Installer:
     # Security constants
     # ------------------------------------------------------------------
     MAX_DOWNLOAD_SIZE: int = 500 * 1024 * 1024  # 500 MB
+    MAX_EXTRACTED_SIZE: int = 500 * 1024 * 1024  # 500 MB uncompressed
+    MAX_ARCHIVE_MEMBERS: int = 10000
     DOWNLOAD_TIMEOUT: int = 60  # seconds
     NETWORK_TIMEOUT: int = 60  # seconds for npm/pip/docker/git commands
     MAX_REDIRECTS: int = 5
@@ -95,6 +96,7 @@ class Installer:
                 or addr.is_link_local
                 or addr.is_reserved
                 or addr.is_multicast
+                or addr.is_unspecified
             )
         except ValueError:
             # Hostname — resolve *all* A/AAAA records and check each one
@@ -114,8 +116,20 @@ class Installer:
                     or addr.is_link_local
                     or addr.is_reserved
                     or addr.is_multicast
+                    or addr.is_unspecified
                 ):
                     return True
+            return False
+
+    @staticmethod
+    def _is_safe_child_path(base: Path, path: Path) -> bool:
+        """Return True when *path* resolves below *base* and is not *base* itself."""
+        try:
+            resolved = path.resolve(strict=False)
+            base_resolved = base.resolve(strict=False)
+            rel = resolved.relative_to(base_resolved)
+            return rel != Path(".")
+        except (ValueError, RuntimeError):
             return False
 
     @staticmethod
@@ -131,12 +145,32 @@ class Installer:
             raise InstallationError(
                 f"binary_url must use HTTPS, got scheme '{parsed.scheme}'"
             )
+        if parsed.username or parsed.password:
+            raise InstallationError("binary_url must not contain embedded credentials")
         hostname = parsed.hostname
         if not hostname:
             raise InstallationError("binary_url missing hostname")
         if Installer._is_internal_address(hostname):
             raise InstallationError(
                 f"binary_url resolves to an internal / restricted address: {hostname}"
+            )
+
+    @staticmethod
+    def _validate_git_url(url: str) -> None:
+        """Validate a git repository URL before invoking the git client."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise InstallationError(
+                f"git_repo must use HTTPS, got scheme '{parsed.scheme}'"
+            )
+        if parsed.username or parsed.password:
+            raise InstallationError("git_repo must not contain embedded credentials")
+        hostname = parsed.hostname
+        if not hostname:
+            raise InstallationError("git_repo missing hostname")
+        if Installer._is_internal_address(hostname):
+            raise InstallationError(
+                f"git_repo resolves to an internal / restricted address: {hostname}"
             )
 
     @staticmethod
@@ -183,6 +217,10 @@ class Installer:
                 raise InstallationError(
                     f"Redirect to non-HTTPS URL: {newurl}"
                 )
+            if parsed.username or parsed.password:
+                raise InstallationError(
+                    f"Redirect contains embedded credentials: {newurl}"
+                )
             hostname = parsed.hostname
             if not hostname or Installer._is_internal_address(hostname):
                 raise InstallationError(
@@ -220,11 +258,8 @@ class Installer:
 
         Raises ValueError if the resolved path escapes the install_dir.
         """
-        resolved = Path(path).resolve()
         base = Path(self.install_dir).resolve()
-        # Ensure the resolved path starts with base + separator to prevent
-        # prefix attacks (e.g., /install_dir_evilsuffix)
-        if not str(resolved).startswith(str(base) + os.sep):
+        if not self._is_safe_child_path(base, Path(path)):
             raise ValueError(
                 f"Path '{path}' is outside install directory '{self.install_dir}'"
             )
@@ -253,6 +288,12 @@ class Installer:
             return False
         return bool(re.match(r"^[a-zA-Z0-9_.@-]+$", package))
 
+    def _is_valid_docker_image(self, image: str) -> bool:
+        """Validate Docker image names enough to prevent option injection."""
+        if not image or image.startswith("-") or ".." in image:
+            return False
+        return bool(re.match(r"^[a-zA-Z0-9_.:/@-]+$", image))
+
     def _is_valid_command_arg(self, arg: str) -> bool:
         """Validate a command argument to prevent shell injection.
 
@@ -262,6 +303,20 @@ class Installer:
         if not arg:
             return False
         return bool(re.match(r"^[a-zA-Z0-9_.\/:@-]+$", arg))
+
+    def _build_install_env(
+        self,
+        method: str,
+        extra: Optional[Dict[str, str]] = None,
+        prepend_path: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Build a sanitized subprocess environment for an installer method."""
+        env = EnvWhitelistManager().build_safe_env(method)
+        if prepend_path:
+            env["PATH"] = prepend_path + os.pathsep + env.get("PATH", "")
+        if extra:
+            env.update(extra)
+        return env
 
     # ------------------------------------------------------------------
     # Public API
@@ -305,7 +360,7 @@ class Installer:
         # 1. Registry lookup
         try:
             tool = self.registry.get_tool(tool_name)
-        except KeyError as exc:
+        except KeyError:
             tool = None
         if tool is None:
             msg = f"Tool '{tool_name}' not found in registry"
@@ -668,9 +723,11 @@ class Installer:
                 errors=[msg],
             )
 
-        env = os.environ.copy()
-        env["NPM_CONFIG_PREFIX"] = target_dir
-        env["PATH"] = os.path.join(target_dir, "bin") + os.pathsep + env.get("PATH", "")
+        env = self._build_install_env(
+            "npm",
+            extra={"NPM_CONFIG_PREFIX": target_dir},
+            prepend_path=os.path.join(target_dir, "bin"),
+        )
 
         self._secure_makedirs(target_dir)
 
@@ -725,9 +782,10 @@ class Installer:
                 errors=[msg],
             )
 
-        env = os.environ.copy()
-        env["PIP_TARGET"] = target_dir
-        env["PYTHONPATH"] = target_dir + os.pathsep + env.get("PYTHONPATH", "")
+        env = self._build_install_env(
+            "pip",
+            extra={"PIP_TARGET": target_dir, "PYTHONPATH": target_dir},
+        )
 
         self._secure_makedirs(target_dir)
 
@@ -776,12 +834,22 @@ class Installer:
 
         self._write_log(tool_name, f"[docker] Pulling image: {image}\n")
 
+        if not self._is_valid_docker_image(image):
+            msg = f"Invalid Docker image name '{image}' for '{tool_name}'"
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
         self._secure_makedirs(target_dir)
 
         # Pull image
         cmd = ["docker", "pull", image]
         returncode, stdout, stderr = self._run_command(
             cmd,
+            env=self._build_install_env("docker"),
             timeout=self.NETWORK_TIMEOUT,
         )
         self._write_log(tool_name, stdout, stderr)
@@ -841,11 +909,25 @@ class Installer:
         errors: List[str] = []
         self._write_log(tool_name, f"[git] Cloning repo: {repo_url}\n")
 
+        try:
+            self._validate_git_url(repo_url)
+        except InstallationError as exc:
+            msg = f"git_repo security validation failed for '{tool_name}': {exc}"
+            return InstallResult(
+                success=False,
+                tool_name=tool_name,
+                message=msg,
+                errors=[msg],
+            )
+
+        env = self._build_install_env("git")
+
         # Clone into target_dir with hooks disabled to prevent arbitrary code execution
         # Use -- to prevent repo_url from being parsed as a git option
         cmd = ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1", "--", repo_url, target_dir]
         returncode, stdout, stderr = self._run_command(
             cmd,
+            env=env,
             timeout=self.NETWORK_TIMEOUT,
         )
         self._write_log(tool_name, stdout, stderr)
@@ -911,6 +993,7 @@ class Installer:
             returncode, stdout, stderr = self._run_command(
                 install_cmd,
                 cwd=target_dir,
+                env=env,
                 timeout=self.NETWORK_TIMEOUT,
             )
             self._write_log(tool_name, stdout, stderr)
@@ -1073,30 +1156,65 @@ class Installer:
 
         # Reset redirect counter for this download
         Installer._SafeRedirectHandler._redirect_count = 0
-        opener = urllib.request.build_opener(Installer._SafeRedirectHandler())
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ctx),
+            Installer._SafeRedirectHandler(),
+        )
 
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "mcp-hub-installer/1.0"},
         )
 
-        with opener.open(req, timeout=self.DOWNLOAD_TIMEOUT) as response:
-            # Atomic creation with restrictive permissions
-            fd = os.open(dest_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as out_file:
-                total = 0
-                while True:
-                    chunk = response.read(self.CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > self.MAX_DOWNLOAD_SIZE:
+        dest_dir = os.path.dirname(dest_path) or "."
+        tmp_path = os.path.join(
+            dest_dir,
+            f".{os.path.basename(dest_path)}.part.{os.getpid()}.{time.time_ns()}",
+        )
+        open_flags = os.O_CREAT | os.O_WRONLY | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            open_flags |= os.O_NOFOLLOW
+
+        try:
+            with opener.open(req, timeout=self.DOWNLOAD_TIMEOUT) as response:
+                response_headers = getattr(response, "headers", {})
+                content_length = response_headers.get("Content-Length")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError:
+                        declared_size = None
+                    if declared_size is not None and declared_size > self.MAX_DOWNLOAD_SIZE:
                         raise InstallationError(
-                            f"Download exceeded maximum allowed size "
-                            f"({self.MAX_DOWNLOAD_SIZE} bytes = 500 MB). "
-                            f"Received so far: {total} bytes"
+                            f"Download declared size {declared_size} exceeds maximum "
+                            f"allowed size ({self.MAX_DOWNLOAD_SIZE} bytes = 500 MB)."
                         )
-                    out_file.write(chunk)
+
+                # Atomic creation with restrictive permissions
+                fd = os.open(tmp_path, open_flags, 0o600)
+                with os.fdopen(fd, "wb") as out_file:
+                    total = 0
+                    while True:
+                        chunk = response.read(self.CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > self.MAX_DOWNLOAD_SIZE:
+                            raise InstallationError(
+                                f"Download exceeded maximum allowed size "
+                                f"({self.MAX_DOWNLOAD_SIZE} bytes = 500 MB). "
+                                f"Received so far: {total} bytes"
+                            )
+                        out_file.write(chunk)
+                    out_file.flush()
+                    os.fsync(out_file.fileno())
+            os.replace(tmp_path, dest_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Verification helpers
@@ -1122,9 +1240,9 @@ class Installer:
 
     def _verify_binary_installation(self, tool_name: str, install_path: str) -> bool:
         """Verify binary installation by ensuring at least one executable exists."""
-        for _, _, files in os.walk(install_path):
+        for root, _, files in os.walk(install_path):
             for f in files:
-                path = os.path.join(install_path, f)
+                path = os.path.join(root, f)
                 if os.access(path, os.X_OK):
                     return True
         return False
@@ -1172,7 +1290,11 @@ class Installer:
         if cmd is None:
             return False
 
-        returncode, _, _ = self._run_command(cmd, timeout=10)
+        returncode, _, _ = self._run_command(
+            cmd,
+            env=self._build_install_env(method),
+            timeout=10,
+        )
         return returncode == 0
 
     def _run_command(
@@ -1265,7 +1387,11 @@ class Installer:
             image = getattr(tool, "docker_image", None)
             if image:
                 try:
-                    self._run_command(["docker", "rmi", image], timeout=60)
+                    self._run_command(
+                        ["docker", "rmi", image],
+                        env=self._build_install_env("docker"),
+                        timeout=60,
+                    )
                 except OSError as exc:
                     logger.error("Failed to remove Docker image '%s' for '%s': %s", image, tool_name, exc)
 
@@ -1295,97 +1421,114 @@ class Installer:
         errors: List[str] = []
         self._write_log(tool_name, f"[binary] Extracting {archive_type} archive: {archive_path}\n")
 
-        def _is_safe_path(base: str, target: str) -> bool:
-            """Ensure target path is strictly under base directory."""
-            abs_base = os.path.abspath(base)
-            abs_target = os.path.abspath(target)
-            try:
-                return os.path.commonpath([abs_base, abs_target]) == abs_base
-            except ValueError:
-                # Different drives on Windows
-                return False
+        target_base = Path(target_dir).resolve(strict=False)
 
-        def _has_path_traversal(name: str) -> bool:
-            """Check if path contains '..' components."""
-            for part in name.replace("\\", "/").split("/"):
-                if part == "..":
-                    return True
-            return False
+        def _archive_member_name(name: str) -> str:
+            """Normalize and validate an archive member name."""
+            if not name or "\x00" in name:
+                raise InstallationError("Archive member has an empty or invalid name")
+            normalized = name.replace("\\", "/")
+            posix_path = PurePosixPath(normalized)
+            windows_path = PureWindowsPath(name)
+            if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+                raise InstallationError(f"Absolute path in archive: {name}")
+            if any(part in ("", ".", "..") for part in posix_path.parts):
+                raise InstallationError(f"Path traversal in archive: {name}")
+            return normalized
+
+        def _validate_destination(member_name: str) -> None:
+            dest = target_base / member_name
+            if not self._is_safe_child_path(target_base, dest):
+                raise InstallationError(f"Archive member escapes target directory: {member_name}")
+
+        def _validate_archive_limits(member_count: int, total_size: int) -> None:
+            if member_count > self.MAX_ARCHIVE_MEMBERS:
+                raise InstallationError(
+                    f"Archive contains too many entries ({member_count}, max {self.MAX_ARCHIVE_MEMBERS})"
+                )
+            if total_size > self.MAX_EXTRACTED_SIZE:
+                raise InstallationError(
+                    f"Archive expands to {total_size} bytes, exceeding max {self.MAX_EXTRACTED_SIZE}"
+                )
+
+        def _harden_extracted_tree() -> None:
+            """Reject symlinks and remove group/world permissions after extraction."""
+            for root, dirs, files in os.walk(target_dir):
+                for name in dirs + files:
+                    full_path = os.path.join(root, name)
+                    if not self._is_safe_child_path(target_base, Path(full_path)):
+                        raise InstallationError(
+                            f"Extracted file outside target directory: {full_path}"
+                        )
+                    if os.path.islink(full_path):
+                        raise InstallationError(f"Symlink created during extraction: {full_path}")
+                    try:
+                        mode = stat.S_IMODE(os.lstat(full_path).st_mode)
+                        if os.path.isdir(full_path):
+                            os.chmod(full_path, 0o700)
+                        else:
+                            os.chmod(full_path, 0o700 if mode & 0o111 else 0o600)
+                    except OSError as exc:
+                        raise InstallationError(
+                            f"Failed to harden extracted path {full_path}: {exc}"
+                        )
 
         try:
             if archive_type == "zip":
                 with zipfile.ZipFile(archive_path, "r") as zf:
-                    for member in zf.infolist():
-                        # Reject path traversal sequences
-                        if _has_path_traversal(member.filename):
+                    members = zf.infolist()
+                    total_size = 0
+                    for member in members:
+                        member_name = _archive_member_name(member.filename)
+                        _validate_destination(member_name)
+                        if member.flag_bits & 0x1:
                             raise InstallationError(
-                                f"Path traversal in archive: {member.filename}"
+                                f"Encrypted zip member is not supported: {member.filename}"
                             )
-                        # Reject absolute paths
-                        if os.path.isabs(member.filename):
-                            raise InstallationError(
-                                f"Absolute path in archive: {member.filename}"
-                            )
-                        dest = os.path.join(target_dir, member.filename)
-                        # Validate destination is strictly under target_dir
-                        if not _is_safe_path(target_dir, dest):
-                            raise InstallationError(
-                                f"Zip Slip detected: {member.filename}"
-                            )
-                        # Reject symlinks (Unix external_attr high 4 bits == 0xA)
-                        if (member.external_attr >> 28) == 0xA:
+                        total_size += member.file_size
+                        _validate_archive_limits(len(members), total_size)
+
+                        mode = (member.external_attr >> 16) & 0o170000
+                        # Reject symlinks and special files. A zero mode is common for
+                        # archives created on platforms that do not store Unix attrs.
+                        if (member.external_attr >> 28) == 0xA or mode == stat.S_IFLNK:
                             raise InstallationError(
                                 f"Symlink in archive: {member.filename}"
+                            )
+                        if mode and not (
+                            stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+                        ):
+                            raise InstallationError(
+                                f"Unsupported zip member type: {member.filename}"
                             )
                     zf.extractall(target_dir)
 
             elif archive_type in ("tar.gz", "tgz"):
                 with tarfile.open(archive_path, "r:gz") as tf:
-                    for member in tf.getmembers():
-                        # Reject path traversal sequences
-                        if _has_path_traversal(member.name):
-                            raise InstallationError(
-                                f"Path traversal in archive: {member.name}"
-                            )
-                        # Reject absolute paths
-                        if os.path.isabs(member.name):
-                            raise InstallationError(
-                                f"Absolute path in archive: {member.name}"
-                            )
-                        dest = os.path.join(target_dir, member.name)
-                        # Validate destination is strictly under target_dir
-                        if not _is_safe_path(target_dir, dest):
-                            raise InstallationError(
-                                f"Tar Slip detected: {member.name}"
-                            )
-                        # Reject symlinks and hardlinks
+                    members = tf.getmembers()
+                    total_size = 0
+                    for member in members:
+                        member_name = _archive_member_name(member.name)
+                        _validate_destination(member_name)
+                        total_size += member.size if member.isfile() else 0
+                        _validate_archive_limits(len(members), total_size)
+
                         if member.issym() or member.islnk():
                             raise InstallationError(
                                 f"Link in archive: {member.name}"
                             )
+                        if not (member.isfile() or member.isdir()):
+                            raise InstallationError(
+                                f"Unsupported tar member type: {member.name}"
+                            )
+                        if member.mode & (stat.S_ISUID | stat.S_ISGID):
+                            raise InstallationError(
+                                f"Setuid/setgid permissions in archive: {member.name}"
+                            )
                     tf.extractall(target_dir)
 
-            # Post-extraction validation: ensure all extracted items are within target_dir
-            for root, dirs, files in os.walk(target_dir):
-                for name in dirs + files:
-                    full_path = os.path.join(root, name)
-                    # Verify file is within target_dir
-                    if not _is_safe_path(target_dir, full_path):
-                        raise InstallationError(
-                            f"Extracted file outside target directory: {full_path}"
-                        )
-                    # Reject any symlinks created during extraction
-                    if os.path.islink(full_path):
-                        link_target = os.readlink(full_path)
-                        if os.path.isabs(link_target):
-                            raise InstallationError(
-                                f"Symlink with absolute target: {full_path} -> {link_target}"
-                            )
-                        resolved = os.path.join(os.path.dirname(full_path), link_target)
-                        if not _is_safe_path(target_dir, resolved):
-                            raise InstallationError(
-                                f"Symlink points outside target: {full_path} -> {link_target}"
-                            )
+            # Post-extraction validation: ensure all extracted items are within target_dir.
+            _harden_extracted_tree()
 
             # Remove archive after extraction
             os.remove(archive_path)

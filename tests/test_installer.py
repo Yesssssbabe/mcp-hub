@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -132,6 +132,55 @@ class TestInstallerInstall:
         monkeypatch.setattr(installer, "_verify_pip_installation", lambda n, p: True)
         result = installer.install("pip-tool")
         assert result.success is True
+
+    def test_install_npm_filters_sensitive_environment(self, tmp_path, monkeypatch):
+        registry = Registry(registry_path=str(tmp_path / "registry.json"))
+        registry.add(make_tool(
+            name="npm-env-tool",
+            install_type="npm",
+            is_installed=True,
+            install_path=str(tmp_path / "npm-env-tool"),
+        ))
+        installer = Installer(install_dir=str(tmp_path))
+        installer.registry = registry
+        monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+        monkeypatch.setenv("NODE_OPTIONS", "--require /tmp/evil.js")
+        monkeypatch.setattr(installer, "_check_prerequisites", lambda m: True)
+        monkeypatch.setattr(installer, "_verify_npm_installation", lambda n, p: True)
+
+        captured = {}
+
+        def mock_run(cmd, cwd=None, env=None, timeout=300):
+            captured["env"] = env
+            return (0, "ok", "")
+
+        monkeypatch.setattr(installer, "_run_command", mock_run)
+        result = installer.install("npm-env-tool")
+
+        assert result.success is True
+        assert "GITHUB_TOKEN" not in captured["env"]
+        assert "NODE_OPTIONS" not in captured["env"]
+        assert captured["env"]["NPM_CONFIG_PREFIX"] == str(tmp_path / "npm-env-tool")
+
+    def test_install_pip_does_not_inherit_sensitive_python_env(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="pip-env-tool", install_type="pip", pip_package="safe-pkg")
+        target_dir = str(tmp_path / "pip-env-tool")
+        monkeypatch.setenv("PYTHONPATH", "/tmp/evil")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+
+        captured = {}
+
+        def mock_run(cmd, cwd=None, env=None, timeout=300):
+            captured["env"] = env
+            return (0, "ok", "")
+
+        monkeypatch.setattr(installer, "_run_command", mock_run)
+        result = installer._install_pip(tool, target_dir)
+
+        assert result.success is True
+        assert captured["env"]["PYTHONPATH"] == target_dir
+        assert "OPENAI_API_KEY" not in captured["env"]
 
     def test_install_docker_mock(self, tmp_path, monkeypatch):
         registry = Registry(registry_path=str(tmp_path / "registry.json"))
@@ -388,7 +437,6 @@ class TestInstallerRunCommand:
 
     def test_run_command_not_found(self, tmp_path, monkeypatch):
         installer = Installer(install_dir=str(tmp_path))
-        import subprocess
         def raise_not_found(*a, **k):
             raise FileNotFoundError("not found")
         monkeypatch.setattr("mcp_hub.installer.subprocess.run", raise_not_found)
@@ -429,12 +477,39 @@ class TestInstallerGit:
         assert result.success is False
         assert "No git_repo" in result.message
 
+    def test_install_git_rejects_insecure_url(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="git-tool",
+            git_repo="http://example.com/x/y",
+            install_command=["true"],
+        )
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is False
+        assert "git_repo security validation failed" in result.message
+
+    def test_install_git_rejects_embedded_credentials(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="git-tool",
+            git_repo="https://user:token@example.com/x/y",
+            install_command=["true"],
+        )
+        result = installer._install_git(tool, str(tmp_path / "git-tool"))
+        assert result.success is False
+        assert "embedded credentials" in result.message
+
     def test_install_git_clone_failure(self, tmp_path, monkeypatch):
         installer = Installer(install_dir=str(tmp_path))
         tool = make_tool(
             name="git-tool",
             git_repo="https://github.com/x/y",
             install_command=["true"],
+        )
+        monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
         )
         monkeypatch.setattr(
             installer, "_run_command",
@@ -450,6 +525,11 @@ class TestInstallerGit:
             name="git-tool",
             git_repo="https://github.com/x/y",
             install_command=["make", "install"],
+        )
+        monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
         )
         def mock_run(cmd, cwd=None, env=None, timeout=300):
             if any("clone" in str(c) for c in cmd):
@@ -468,11 +548,32 @@ class TestInstallerGit:
             install_command=["true"],
         )
         monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
+        )
+        monkeypatch.setattr(
             installer, "_run_command",
             lambda cmd, cwd=None, env=None, timeout=300: (0, "ok", "")
         )
         result = installer._install_git(tool, str(tmp_path / "git-tool"))
         assert result.success is True
+
+
+class TestInstallerDockerSecurity:
+    """Security tests for Docker installation."""
+
+    def test_install_docker_rejects_option_injection(self, tmp_path):
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(
+            name="docker-tool",
+            install_type="docker",
+            docker_image="--privileged",
+            install_command="docker pull x",
+        )
+        result = installer._install_docker(tool, str(tmp_path / "docker-tool"))
+        assert result.success is False
+        assert "Invalid Docker image" in result.message
 
 
 class TestInstallerBinary:
@@ -496,6 +597,11 @@ class TestInstallerBinary:
         import urllib.error
         installer = Installer(install_dir=str(tmp_path))
         tool = make_tool(name="bin-tool", binary_url="https://example.com/bin.tar.gz")
+        monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
+        )
         def raise_error(*a, **k):
             raise urllib.error.URLError("network down")
         class FailingOpener:
@@ -512,10 +618,16 @@ class TestInstallerBinary:
     def test_install_binary_success(self, tmp_path, monkeypatch):
         installer = Installer(install_dir=str(tmp_path))
         tool = make_tool(name="bin-tool", binary_url="https://example.com/bin")
+        monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
+        )
         class MockResponse:
             def __init__(self, data):
                 self._data = data
                 self._pos = 0
+                self.headers = {}
             def __enter__(self):
                 return self
             def __exit__(self, *args):
@@ -539,10 +651,47 @@ class TestInstallerBinary:
         assert result.success is True
         assert "Binary downloaded" in result.message
 
+    def test_download_binary_removes_partial_file_on_size_violation(self, tmp_path, monkeypatch):
+        installer = Installer(install_dir=str(tmp_path))
+        installer.MAX_DOWNLOAD_SIZE = 4
+        dest_path = str(tmp_path / "tool.bin")
+
+        class MockResponse:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size=-1):
+                return b"12345"
+
+        class MockOpener:
+            def open(self, *a, **k):
+                return MockResponse()
+
+        monkeypatch.setattr(
+            "mcp_hub.installer.urllib.request.build_opener",
+            lambda *a, **k: MockOpener()
+        )
+
+        with pytest.raises(Exception):
+            installer._download_binary_to_file("https://example.com/tool.bin", dest_path)
+
+        assert not os.path.exists(dest_path)
+        assert not list(tmp_path.glob(".tool.bin.part.*"))
+
     def test_install_binary_zip_extraction(self, tmp_path, monkeypatch):
         import zipfile
         installer = Installer(install_dir=str(tmp_path))
         tool = make_tool(name="zip-tool", binary_url="https://example.com/tool.zip")
+        monkeypatch.setattr(
+            Installer,
+            "_is_internal_address",
+            staticmethod(lambda host: False),
+        )
         zip_path = str(tmp_path / "tool.zip")
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("hello.txt", "hello world")
@@ -550,6 +699,7 @@ class TestInstallerBinary:
             def __init__(self, data):
                 self._data = data
                 self._pos = 0
+                self.headers = {}
             def __enter__(self):
                 return self
             def __exit__(self, *args):
@@ -615,6 +765,53 @@ class TestInstallerExtractArchive:
         bad_path = str(tmp_path / "bad.zip")
         Path(bad_path).write_text("not a zip")
         result = installer._extract_archive(tool, str(tmp_path / "extract"), bad_path, "zip")
+        assert result.success is False
+
+    def test_extract_archive_rejects_zip_traversal(self, tmp_path):
+        import zipfile
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="zip-slip")
+        target_dir = str(tmp_path / "extract")
+        os.makedirs(target_dir, exist_ok=True)
+        zip_path = str(tmp_path / "evil.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("../evil.txt", "owned")
+
+        result = installer._extract_archive(tool, target_dir, zip_path, "zip")
+
+        assert result.success is False
+        assert not os.path.exists(tmp_path / "evil.txt")
+
+    def test_extract_archive_rejects_zip_bomb_size(self, tmp_path):
+        import zipfile
+        installer = Installer(install_dir=str(tmp_path))
+        installer.MAX_EXTRACTED_SIZE = 4
+        tool = make_tool(name="zip-bomb")
+        target_dir = str(tmp_path / "extract")
+        os.makedirs(target_dir, exist_ok=True)
+        zip_path = str(tmp_path / "large.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("large.txt", "12345")
+
+        result = installer._extract_archive(tool, target_dir, zip_path, "zip")
+
+        assert result.success is False
+
+    def test_extract_archive_rejects_tar_symlink(self, tmp_path):
+        import tarfile
+        installer = Installer(install_dir=str(tmp_path))
+        tool = make_tool(name="tar-link")
+        target_dir = str(tmp_path / "extract")
+        os.makedirs(target_dir, exist_ok=True)
+        tgz_path = str(tmp_path / "link.tar.gz")
+        with tarfile.open(tgz_path, "w:gz") as tf:
+            info = tarfile.TarInfo(name="link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tf.addfile(info)
+
+        result = installer._extract_archive(tool, target_dir, tgz_path, "tar.gz")
+
         assert result.success is False
 
 
