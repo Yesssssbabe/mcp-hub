@@ -180,6 +180,7 @@ ALLOWED_EXPORT_DIR = _expand_path(DEFAULT_DATA_DIR)
 ALLOWED_COMMANDS = {
     "npx", "uvx", "node", "python", "python3", "docker", "uv"
 }
+ALLOWED_PYTHON_COMMAND = re.compile(r"^python3(?:\.\d+)*$")
 
 # Dangerous shell metacharacters that should not appear in args
 SHELL_METACHARS = re.compile(r'[;|&$(){}[\]<>`]')
@@ -197,7 +198,10 @@ def _validate_command(command: str) -> None:
         raise ConfigError("Command must not be empty")
     cmd_path = command.strip()
     cmd_name = os.path.basename(cmd_path)
-    if cmd_name not in ALLOWED_COMMANDS:
+    if (
+        cmd_name not in ALLOWED_COMMANDS
+        and not ALLOWED_PYTHON_COMMAND.fullmatch(cmd_name)
+    ):
         raise ConfigError(
             f"Command '{cmd_name}' is not in the allowed list: {ALLOWED_COMMANDS}"
         )
