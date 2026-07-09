@@ -21,6 +21,7 @@
 - [Development](#development)
 - [Architecture](#architecture)
 - [Contributing](#contributing)
+- [Roadmap](#roadmap)
 - [License & Credits](#license--credits)
 
 ---
@@ -41,7 +42,7 @@ As the MCP ecosystem rapidly grows, hundreds of MCP tools (also called MCP Serve
 - **Security risks**: No quick way to assess permission risks and security levels
 - **Version management**: Lack of version control and update mechanisms
 
-**MCP Hub** solves all of these problems. It provides a one-stop MCP tool discovery, installation, configuration, and management experience, allowing developers to integrate any MCP tool into their workflow in seconds.
+**MCP Hub** is designed to gradually solve these problems. It provides MCP tool discovery, installation, configuration, and security scanning workflows so developers can integrate common registry-backed MCP tools faster.
 
 ### Core Positioning
 
@@ -50,7 +51,7 @@ MCP Hub is positioned as the **"npm + Homebrew" of the MCP ecosystem** — a pla
 | Analogy | MCP Hub Feature |
 |---------|-----------------|
 | npm Registry | MCP Hub Registry — indexes all MCP tools |
-| `npm install` | `mcp-hub install` — one-click install any MCP tool |
+| `npm install` | `mcp-hub install` — install registry-backed MCP tools |
 | `package.json` | `mcp-hub config` — unified client configuration management |
 | `npm audit` | `mcp-hub scan` — security scanning and risk assessment |
 | Homebrew Cask | `mcp-hub search` — discover new tools |
@@ -62,13 +63,15 @@ MCP Hub is positioned as the **"npm + Homebrew" of the MCP ecosystem** — a pla
 - ✅ **MCP Tool Discovery & Search** — Smart search by name, tags, categories, keywords
 - ✅ **One-Click Installation** — Supports npm, pip, Docker, git, binary, and auto-detection
 - ✅ **Multi-Client Configuration** — Auto-adapts to Claude, Cursor, Cline, Copilot, VSCode, Windsurf
-- ✅ **Security Scanning & Scoring** — Static code analysis + dynamic permission detection, 0-100 security score
+- ✅ **Security Scanning & Scoring** — Static code analysis, permission/network risk analysis, dependency file parsing, 0-100 security score
 - ✅ **Client Auto-Configuration** — Automatically configure installed tools to specified clients
 - ✅ **Cross-Platform Support** — Native support for macOS, Windows, Linux
 - ✅ **Environment Variable Support** — `MCP_HUB_CONFIG_DIR` for custom config directory
 - ✅ **Rich CLI Output** — Beautiful tables and colored output using Rich
 - ✅ **Dry-Run Mode** — Preview installation steps without making changes
 - ✅ **Batch Scanning** — Scan all installed tools at once
+- ✅ **Local Caches** — Local registry, scan cache, and offline vulnerability DB components
+- 🚧 **v0.2.0 Security Enhancements In Progress** — OSV client, offline fallback, and scan cache components are present; security policy enforcement, install gates, and audit logging remain roadmap items
 
 ---
 
@@ -512,15 +515,15 @@ MCP Hub provides a 0-100 security score for each tool based on the following dim
 |-----------|--------|-------------|
 | **Permission Scope** | 30% | Breadth of permissions (filesystem, network, code execution, etc.) |
 | **Code Analysis** | 35% | Static code analysis results |
-| **Dependency Security** | 20% | Known vulnerabilities in third-party dependencies |
+| **Dependency Risk** | 20% | Dependency file parsing, risky dependency names, and version risk signals; OSV intelligence components are being integrated in v0.2.0 |
 | **Network Analysis** | 15% | Network access requirements and risk assessment |
 
 ### Security Levels
 
-- **🟢 90-100**: Verified — Official maintenance, minimal permissions, no known vulnerabilities
-- **🟡 70-89**: High — Well-maintained community tools, reasonable permissions
-- **🟠 50-69**: Medium — Broad permissions or known dependency issues
-- **🔴 0-49**: Low/Unknown — Code execution permissions, unrestricted network access, or serious vulnerabilities
+- **🟢 90-100**: Very low risk — Limited permissions and no obvious static/dependency risk signals
+- **🟡 70-89**: Low risk — Minor findings or limited verifiability for uninstalled tools
+- **🟠 50-69**: Use caution — Broad permissions, dependency, or network risk signals
+- **🔴 0-49**: High risk — Code execution, write access, network, or dependency risks are significant
 
 ### Permission Types
 
@@ -549,7 +552,7 @@ Each MCP tool's permissions are explicitly declared in the registry:
 ### Clone the Project
 
 ```bash
-git clone https://github.com/your-org/mcp-hub.git
+git clone https://github.com/Yesssssbabe/mcp-hub.git
 cd mcp-hub
 ```
 
@@ -619,18 +622,25 @@ mcp-hub/
 ├── src/mcp_hub/
 │   ├── __init__.py        # Package entry
 │   ├── cli.py             # Command-line interface (Typer)
-│   ├── registry.py        # Tool registry (local + remote)
+│   ├── registry.py        # Tool registry (local + built-in)
 │   ├── installer.py       # Installation manager (npm/pip/docker/git/binary)
 │   ├── config.py          # Configuration management (multi-client adapters)
 │   ├── security.py        # Security scanning engine
+│   ├── osv_client.py      # OSV vulnerability intelligence client
+│   ├── scan_cache.py      # Scan result cache and invalidation
+│   ├── offline_vuln_db.py # Offline vulnerability database
+│   ├── vulnerability_models.py # Vulnerability scanning data models
 │   ├── utils.py           # Utility functions and helpers
 │   └── constants.py       # Constants and defaults
 ├── tests/
 │   ├── test_cli.py        # CLI tests
 │   ├── test_config.py     # Config tests
-│   ├── test_installer.py # Installer tests
+│   ├── test_installer.py  # Installer tests
 │   ├── test_registry.py   # Registry tests
 │   ├── test_security.py   # Security tests
+│   ├── test_osv_client.py # OSV client tests
+│   ├── test_osv_integration.py # OSV integration tests
+│   ├── test_scan_cache.py # Scan cache tests
 │   ├── test_utils.py      # Utility tests
 │   └── conftest.py        # Shared fixtures
 ├── pyproject.toml         # Project configuration and dependencies
@@ -643,10 +653,12 @@ mcp-hub/
 | Module | Responsibility |
 |--------|---------------|
 | `cli.py` | Parse command-line arguments, call functional modules, format output |
-| `registry.py` | Maintain tool metadata index, support search, query, caching |
+| `registry.py` | Maintain tool metadata index, support search, query, and built-in tools |
 | `installer.py` | Unified interface for multiple installation methods, handle dependencies |
 | `config.py` | Adapt configuration formats for different clients, read/write config files |
-| `security.py` | Static code analysis, permission extraction, vulnerability scanning, scoring |
+| `security.py` | Static code analysis, permission/network risk analysis, dependency parsing, scoring |
+| `osv_client.py` / `dependency_vuln_mapper.py` | OSV queries, dependency-to-vulnerability mapping, offline fallback |
+| `scan_cache.py` / `offline_vuln_db.py` | Scan cache, invalidation, offline vulnerability data storage |
 | `utils.py` | Shared utilities, logging, progress bars, platform detection |
 
 ---
@@ -657,7 +669,7 @@ We welcome all forms of contribution! Whether submitting new MCP tools, fixing b
 
 ### How to Submit an MCP Tool
 
-1. Submit a tool inclusion request in [GitHub Issues](https://github.com/your-org/mcp-hub/issues)
+1. Submit a tool inclusion request in [GitHub Issues](https://github.com/Yesssssbabe/mcp-hub/issues)
 2. Or directly edit `registry/tools.json` and submit a PR
 3. Tools must include the following information:
    - Name and unique identifier
@@ -688,6 +700,39 @@ See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for details, including:
 - All new features must include corresponding test cases
 - Integration tests verify end-to-end workflows
 - Use `pytest` as the test framework
+
+---
+
+## Roadmap
+
+### v0.1.0 — Core CLI ✅
+
+- [x] Core command-line interface with global `--version`
+- [x] Registry search with tag/category/limit/sort/JSON options
+- [x] Install support for npm, pip, Docker, git, binary, and auto-detection
+- [x] Multi-client configuration for Claude, Cursor, Cline, Copilot, VSCode, and Windsurf
+- [x] Basic security scanning with quick, detailed, JSON, and severity-filtered output
+- [x] Install dry-run, force reinstall, config import/export, and config validation
+
+### v0.2.0 — Security Scanning Enhancements 🚧
+
+The current v0.2.0 branch adds OSV-related building blocks and test coverage, but not every planned security-policy workflow is user-facing yet.
+
+- [x] OSV client models and mocked API tests
+- [x] Dependency-to-OSV query mapping for npm, PyPI, Go, Rust, Maven, RubyGems, and Packagist ecosystems
+- [x] Offline vulnerability DB, scan cache, TTL, and invalidation support
+- [x] Normalized vulnerability model with CVE/GHSA IDs, severity, CVSS, and fixed-version metadata
+- [ ] User/project security policy configuration
+- [ ] Install-time security gates such as `--no-scan` or `--allow-risk`
+- [ ] Audit log for install, uninstall, update, config change, policy override, and scan events
+- [ ] Expanded CLI report fields and `docs/SECURITY.md` examples
+
+### v0.3.0+ — Planned
+
+- [ ] Custom installer plugins
+- [ ] Client configuration adapter plugins
+- [ ] Custom security scanning rules
+- [ ] Private registries, centralized policy, and compliance reporting
 
 ---
 
@@ -725,7 +770,7 @@ SOFTWARE.
 
 - [Anthropic](https://www.anthropic.com/) — Initiated the MCP protocol
 - [Model Context Protocol](https://modelcontextprotocol.io/) — Official protocol specification
-- All [contributors](https://github.com/your-org/mcp-hub/graphs/contributors) — Making the project better
+- All [contributors](https://github.com/Yesssssbabe/mcp-hub/graphs/contributors) — Making the project better
 
 ---
 
@@ -734,7 +779,7 @@ SOFTWARE.
 </p>
 
 <p align="center">
-  <a href="https://github.com/your-org/mcp-hub/issues">Report Issues</a> •
-  <a href="https://github.com/your-org/mcp-hub/discussions">Discussions</a> •
+  <a href="https://github.com/Yesssssbabe/mcp-hub/issues">Report Issues</a> •
+  <a href="https://github.com/Yesssssbabe/mcp-hub/discussions">Discussions</a> •
   <a href="https://modelcontextprotocol.io/">MCP Official Docs</a>
 </p>

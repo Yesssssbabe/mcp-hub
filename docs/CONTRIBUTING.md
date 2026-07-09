@@ -31,7 +31,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/your-org/mcp-hub.git
+git clone https://github.com/Yesssssbabe/mcp-hub.git
 cd mcp-hub
 ```
 
@@ -633,4 +633,4 @@ black src/mcp_hub tests
 
 ---
 
-*如有其他问题，请在 [GitHub Discussions](https://github.com/your-org/mcp-hub/discussions) 中提问。*
+*如有其他问题，请在 [GitHub Discussions](https://github.com/Yesssssbabe/mcp-hub/discussions) 中提问。*

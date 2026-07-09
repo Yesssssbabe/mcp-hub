@@ -67,7 +67,7 @@ class SecurityReport:
     status: str = "scanned"
     scanned_at: str = field(default_factory=lambda: datetime.now().isoformat())
     scan_duration: float = 0.0
-    scanner_version: str = "0.1.0"
+    scanner_version: str = "0.2.0"
     
     def to_dict(self, exclude_none: bool = False) -> Dict:
         d = {
