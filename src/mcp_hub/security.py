@@ -55,6 +55,7 @@ class SecurityReport:
     permissions_analysis: Dict[str, Any] = field(default_factory=dict)
     code_analysis: Dict[str, Any] = field(default_factory=dict)
     dependency_analysis: Dict[str, Any] = field(default_factory=dict)
+    vulnerabilities: List[Any] = field(default_factory=list)
     network_analysis: Dict[str, Any] = field(default_factory=dict)
     
     # Findings
@@ -77,6 +78,9 @@ class SecurityReport:
             "permissions_analysis": self.permissions_analysis,
             "code_analysis": self.code_analysis,
             "dependency_analysis": self.dependency_analysis,
+            "vulnerabilities": [
+                v.to_dict() if hasattr(v, "to_dict") else v for v in self.vulnerabilities
+            ],
             "network_analysis": self.network_analysis,
             "warnings": self.warnings,
             "errors": self.errors,
@@ -484,6 +488,7 @@ class SecurityScanner:
             permissions_analysis=permissions_analysis,
             code_analysis=code_analysis,
             dependency_analysis=dependency_analysis,
+            vulnerabilities=dependency_analysis.get("vulnerabilities", []),
             network_analysis=network_analysis,
             warnings=[],
             errors=[],
@@ -548,6 +553,46 @@ class SecurityScanner:
         for cache_key in list(self._scan_cache.keys()):
             if cache_key[1] == tool_name:
                 del self._scan_cache[cache_key]
+
+    def invalidate_scan_cache(self, tool_name: str) -> int:
+        """Compatibility alias that returns the number of removed entries."""
+        removed = 0
+        for cache_key in list(self._scan_cache.keys()):
+            if cache_key[1] == tool_name:
+                del self._scan_cache[cache_key]
+                removed += 1
+        return removed
+
+    def invalidate_all_scan_cache(self) -> int:
+        """Clear all in-memory scan cache entries."""
+        removed = len(self._scan_cache)
+        self._scan_cache.clear()
+        return removed
+
+    def scan_tool(self, tool_name: str):
+        """Run the v0.2 dependency vulnerability scan facade.
+
+        This keeps the existing SecurityReport-producing ``scan`` API intact
+        while giving the new OSV tests a ScanResult-oriented entrypoint.
+        """
+        from mcp_hub.dependency_vuln_mapper import DependencyVulnMapper
+        from mcp_hub.vulnerability_models import ScanResult
+
+        tool = self._get_tool(tool_name)
+        if tool is None:
+            result = ScanResult(tool_name=tool_name)
+            result.add_error(f"Tool '{tool_name}' not found in registry")
+            return result
+
+        dependency_analysis = self._check_dependencies(tool, self._get_install_path(tool))
+        dependencies = dependency_analysis.get("dependencies", [])
+        if not dependencies:
+            result = ScanResult(tool_name=tool_name, dependency_count=0)
+            result.add_warning("No dependencies found")
+            return result
+
+        mapper = DependencyVulnMapper(offline_mode=True)
+        return mapper.scan_dependencies(tool_name, dependencies)
 
     def quick_scan_score(self, tool_name: str) -> int:
         """Quick security score (0-100) without detailed analysis.

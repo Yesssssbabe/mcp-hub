@@ -29,6 +29,7 @@ class OfflineVulnDB:
         *,
         db_path: Optional[str] = None,
         max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+        ttl_seconds: Optional[float] = None,
     ):
         if db_path:
             self.db_path = Path(db_path)
@@ -42,6 +43,8 @@ class OfflineVulnDB:
             )
             self.db_path = base / DEFAULT_DB_NAME
         self.max_age_days = max_age_days
+        if ttl_seconds is not None:
+            self.max_age_days = ttl_seconds / 86400.0
         self._data: Dict[str, Any] = {
             "version": 1,
             "entries": {},
@@ -88,6 +91,18 @@ class OfflineVulnDB:
         self._data["last_updated"] = time.time()
         self._save()
 
+    def store(self, entry: VulnerabilityEntry, ecosystem: str = "") -> None:
+        """Store a single vulnerability entry.
+
+        Compatibility wrapper for the first v0.2.0 test suite.
+        """
+        if ecosystem and not entry.ecosystem:
+            entry = entry.model_copy(update={"ecosystem": ecosystem})
+        existing = self.lookup(entry.package)
+        by_id = {v.id: v for v in existing}
+        by_id[entry.id] = entry
+        self.add(entry.package, list(by_id.values()))
+
     def lookup(self, package_name: str) -> List[VulnerabilityEntry]:
         """Lookup vulnerabilities for a package (case-insensitive)."""
         key = package_name.lower()
@@ -105,6 +120,28 @@ class OfflineVulnDB:
             return []
         vulns = record.get("vulns", [])
         return [VulnerabilityEntry(**v) for v in vulns]
+
+    def query(
+        self,
+        package_name: str,
+        version: str = "",
+        ecosystem: str = "",
+    ) -> List[VulnerabilityEntry]:
+        """Lookup vulnerabilities by package, optionally filtering ecosystem/version."""
+        results = self.lookup(package_name)
+        if ecosystem:
+            results = [
+                vuln
+                for vuln in results
+                if not vuln.ecosystem or vuln.ecosystem.lower() == ecosystem.lower()
+            ]
+        if version:
+            filtered = []
+            for vuln in results:
+                if not vuln.version or vuln.version == version:
+                    filtered.append(vuln)
+            results = filtered
+        return results
 
     def lookup_batch(
         self, package_names: List[str]
@@ -144,6 +181,10 @@ class OfflineVulnDB:
             self._save()
         return len(stale)
 
+    def purge_expired(self) -> int:
+        """Compatibility alias for cleanup()."""
+        return self.cleanup()
+
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
@@ -160,6 +201,10 @@ class OfflineVulnDB:
         )
         return {
             "total_packages": total,
+            "total_entries": sum(
+                len(record.get("vulns", []))
+                for record in self._data["entries"].values()
+            ),
             "stale_packages": stale,
             "max_age_days": self.max_age_days,
             "db_path": str(self.db_path),
