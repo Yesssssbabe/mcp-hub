@@ -91,8 +91,7 @@ class MCPTool(BaseModel):
     version: str = Field("0.1.0", description="Current version")
     author: str = Field(..., description="Author or organization")
     repository: str = Field(
-        ...,
-        pattern=r"^https?://",
+        "",
         description="GitHub repository URL"
     )
     homepage: Optional[str] = Field(
@@ -188,6 +187,15 @@ class MCPTool(BaseModel):
                     raise ValueError(f"install_command arg contains illegal characters: {arg!r}")
             return v
         raise ValueError("install_command must be a string or list of strings")
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, v: str) -> str:
+        if not v:
+            return ""
+        if not re.match(r"^https?://", v):
+            raise ValueError("repository must start with http:// or https://")
+        return v
 
     def model_dump_public(self) -> Dict[str, Any]:
         """Serialize tool with sensitive env vars masked."""

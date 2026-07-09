@@ -1,53 +1,58 @@
-# UAT Fix Plan — fix_install_client & comprehensive fixes
+# v0.2.0 Group 1: OSV NPM Query — 执行计划
 
-## 阶段 1: 基础设施修复 (constants.py, registry.py, config.py)
-- [fix_path_consistency] 统一配置目录为 `~/.config/mcp-hub/`，回退 `~/.mcp-hub/`
-- [fix_env_var] 读取 `MCP_HUB_CONFIG_DIR` 环境变量
-- [fix_registry_builtin] 在 Registry 添加 `load_builtin_registry()` 方法
+## 目标
+将安全扫描从"本地启发式评分"升级为"本地规则 + 在线OSV漏洞情报 + 策略判定"组合模型。
 
-## 阶段 2: CLI 核心修复 (cli.py)
-- [fix_init_registry] init() 创建 registry.json 并加载内置工具
-- [fix_init_config] init() 创建默认 config.json
-- [fix_init_force] 添加 --force 选项到 init
-- [fix_init_configdir] 添加 --config-dir 选项到 init
-- [fix_install_toolname] 支持 npm scope 包名 (@org/package)
-- [fix_install_param] 修复参数传递
-- [fix_install_client] 添加 --client 选项到 install
-- [fix_install_dryrun] 添加 --dry-run 选项到 install
-- [fix_install_force] 添加 --force 选项到 install
-- [fix_install_method] 添加 --method 选项到 install
-- [fix_scan_attr] 修复 report.level -> report.security_level
-- [fix_scan_return] 修复 quick_scan() 返回类型
-- [fix_scan_detailed] 添加 --detailed 选项到 scan
-- [fix_scan_json] 添加 --json 选项到 scan
-- [fix_scan_severity] 添加 --severity 选项到 scan
-- [fix_scan_noarg] 支持无参数扫描所有已安装工具
-- [fix_except_handler] 修复 except Exception 捕获 typer.Exit
-- [fix_base_dir] 修复 --base-dir 路径验证逻辑
-- [fix_version_global] 添加 --version 全局选项
-- [fix_search_limit] 添加 --limit 选项到 search
-- [fix_search_sort] 添加 --sort 选项到 search
-- [fix_search_json] 添加 --json 选项到 search
-- [fix_search_tag] 修复 --tag 别名
-- [fix_list_category] 添加 --category 选项到 list
-- [fix_list_json] 添加 --json 选项到 list
-- [fix_list_installed] 修复 list --installed
-- [fix_config_show] 添加 --show 选项到 config
-- [fix_config_export] 添加 --export 选项到 config
-- [fix_config_import] 添加 --import 选项到 config
-- [fix_config_validate] 添加 --validate 选项到 config
-- [fix_config_env] 添加 --env 选项到 config add
-- [fix_uninstall_purge] 添加 --purge 选项到 uninstall
-- [fix_uninstall_yes] 添加 --yes 选项到 uninstall
-- [fix_empty_hint] 空注册表时添加引导提示
-- [fix_log_prefix] 移除 config generate 的 [INFO] CLI: 前缀
-- [fix_error_msg] 统一错误信息格式
+## 新增文件
+1. `src/mcp_hub/vulnerability_models.py` — VulnerabilityEntry pydantic模型 + ScanResult
+2. `src/mcp_hub/osv_client.py` — OSV API客户端（批量查询、单包查询、速率限制、重试、错误处理）
+3. `src/mcp_hub/scan_cache.py` — 扫描缓存（TTL、手动失效、依赖变更检测）
+4. `src/mcp_hub/dependency_mapper.py` — 依赖解析→OSV查询格式转换（npm/pip/cargo/go）
+5. `src/mcp_hub/offline_vuln_db.py` — 本地SQLite漏洞数据库（离线降级）
 
-## 阶段 3: 数据模型修复 (security.py, config.py)
-- [fix_security_report] 修复 SecurityReport 字段名一致性
-- [fix_config_data] 修复 config add/list/remove 数据模型一致性
-- [fix_config_path] 修复 config add 命令 PATH 查找
+## 修改文件
+1. `src/mcp_hub/security.py` — 集成OSV扫描到SecurityScanner.scan()流程
+2. `tests/test_security.py` — 新增OSV集成测试
 
-## 阶段 4: 验证
-- py_compile 所有文件
-- 运行测试检查
+## 执行顺序（Stage-Gate）
+
+### Stage 1: 数据模型（独立）
+- `vulnerability_models.py`: VulnerabilityEntry, ScanResult, SeverityLevel
+- 使用 pydantic v2
+
+### Stage 2: OSV API客户端（独立）
+- `osv_client.py`: OSVClient类
+  - 批量查询 /v1/querybatch
+  - 单包查询 /v1/query
+  - 速率限制（token bucket）
+  - 重试机制（指数退避）
+  - 错误处理（timeout, 404, 500, 429）
+  - 网络不可用时抛出OSError，由调用方降级
+
+### Stage 3: 依赖映射器（依赖Stage 1）
+- `dependency_mapper.py`: 将package.json/requirements.txt等解析结果转为OSV查询格式
+- 支持 npm, pip, cargo, go
+
+### Stage 4: 扫描缓存（独立）
+- `scan_cache.py`: TTL缓存 + 手动失效 + 依赖文件mtime检测
+
+### Stage 5: 离线漏洞数据库（独立）
+- `offline_vuln_db.py`: SQLite本地缓存，schema设计，查询接口
+
+### Stage 6: 集成到security.py（依赖Stage 1-5）
+- SecurityScanner新增OSV集成
+- _check_dependencies调用OSV查询
+- 网络不可用时降级为本地扫描
+- 新增vulnerabilities字段到SecurityReport
+
+### Stage 7: 测试
+- mock API测试
+- 离线降级测试
+- 缓存失效测试
+- 速率限制测试
+
+## 代码风格
+- black (line-width 100)
+- ruff
+- mypy strict mode
+- pydantic v2

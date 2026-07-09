@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "mcp-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP Hub - Discover, install, and manage MCP tools."
 readme = "README.md"
 license = "MIT"

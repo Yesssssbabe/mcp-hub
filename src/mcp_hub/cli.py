@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any, Union
 import typer
 from typing_extensions import Annotated
 
+from mcp_hub import __version__
 from mcp_hub.config import ConfigManager, MCPConfig, _validate_env
 from mcp_hub.constants import DEFAULT_DATA_DIR, INSTALL_TYPES, MCPHubError, SUPPORTED_CLIENTS
 from mcp_hub.installer import Installer
@@ -26,7 +27,7 @@ logger = logging.getLogger("mcp_hub.cli")
 app = typer.Typer(
     name="mcp-hub",
     help="MCP Hub - Discover, install, and manage MCP tools",
-    epilog="Documentation: https://github.com/your-org/mcp-hub#readme",
+    epilog="Documentation: https://github.com/Yesssssbabe/mcp-hub#readme",
     invoke_without_command=True,
     no_args_is_help=False,
     add_completion=True,
@@ -476,7 +477,7 @@ def _main_callback(
 ) -> None:
     """MCP Hub CLI."""
     if version:
-        typer.echo("mcp-hub 0.1.0")
+        typer.echo(f"mcp-hub {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
@@ -1264,6 +1265,6 @@ def main() -> None:
     """Entry point for CLI."""
     import sys
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
-        typer.echo("mcp-hub 0.1.0")
+        typer.echo(f"mcp-hub {__version__}")
         sys.exit(0)
     app(prog_name="mcp-hub")
